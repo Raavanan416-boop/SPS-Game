@@ -1571,11 +1571,13 @@ tabRegisterBtn.addEventListener('click', () => {
     authFeedback.classList.add('hidden');
 });
 
-closeAuthBtn.addEventListener('click', () => {
-    if (currentUser) {
-        authOverlay.classList.add('hidden');
-    }
-});
+if (closeAuthBtn) {
+    closeAuthBtn.addEventListener('click', () => {
+        if (currentUser) {
+            authOverlay.classList.add('hidden');
+        }
+    });
+}
 
 registerForm.addEventListener('submit', async (e) => {
     e.preventDefault();
