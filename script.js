@@ -34,8 +34,8 @@ import {
     rtdbGet
 } from './firebase-config.js';
 
-// Initialize Socket.IO Client
-const socket = io();
+// Initialize Socket.IO Client safely (compatible with static hosts & live backend)
+const socket = (typeof io !== 'undefined') ? io({ autoConnect: true, reconnectionAttempts: 5, timeout: 5000 }) : null;
 
 /**
  * --------------------------------------------------------------------------
