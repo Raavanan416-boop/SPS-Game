@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="A modern full-stack Stone Paper Scissors game with Real-Time Multiplayer, Express backend, Socket.IO, Firebase Auth & Firestore.">
+    <title>Stone Paper Scissors Game - Real-Time Multiplayer</title>
+    
+    <!-- Google Fonts for modern gaming aesthetic -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+    
+    <!-- Socket.IO Client Library -->
+    <script src="/socket.io/socket.io.js"></script>
+
+    <!-- External CSS Stylesheet -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- Auth Loading Screen (shown while Firebase checks auth state) -->
+    <div class="overlay-modal" id="auth-loading-overlay">
+        <div class="modal-card" style="text-align: center; padding: 3rem 2rem;">
+            <div style="font-size: 2.5rem; margin-bottom: 1rem;">⚡</div>
+            <h2 class="modal-title">STONE • PAPER • SCISSORS</h2>
+            <p class="modal-subtitle" style="margin-top: 0.5rem;">Checking authentication...</p>
+        </div>
+    </div>
+
+    <!-- Floating Reward Toast Notification -->
+    <div class="reward-toast hidden" id="reward-toast">+50 XP • +20 🪙</div>
+
+    <!-- ====================================================================
+         GLOBAL PLAYER PROGRESS & AUTH HEADER (Visible Across App)
+         ==================================================================== -->
+    <div class="global-progress-bar">
+        <button class="profile-pill-btn" id="open-profile-btn" title="View Player Profile">
+            <span class="profile-avatar">🥷</span>
+            <span class="profile-level-badge" id="header-level-badge">LVL 1</span>
+        </button>
+
+        <div class="xp-progress-wrapper">
+            <div class="xp-text-row">
+                <span class="xp-title" id="header-username-display">Guest Player</span>
+                <span class="xp-counter" id="header-xp-text">0 / 100 XP</span>
+            </div>
+            <div class="xp-bar-track">
+                <div class="xp-bar-fill" id="header-xp-fill" style="width: 0%;"></div>
+            </div>
+        </div>
+
+        <div class="coins-display-pill" id="header-coins-pill" title="Coins Collected">
+            <span class="coin-icon">🪙</span>
+            <span class="coin-amount" id="header-coins-count">0</span>
+        </div>
+
+        <!-- Auth Action Header Button -->
+        <button class="auth-header-btn" id="header-auth-btn">
+            <span class="btn-icon">🔑</span> Login
+        </button>
+    </div>
+
+
+    <!-- ====================================================================
+         1. FIREBASE AUTHENTICATION MODAL (LOGIN & REGISTER)
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="auth-overlay">
+        <div class="modal-card auth-modal-card">
+            <div class="auth-tabs">
+                <button class="auth-tab active" id="tab-login-btn">Login</button>
+                <button class="auth-tab" id="tab-register-btn">Register</button>
+            </div>
+
+            <!-- Login Form -->
+            <form class="auth-form" id="login-form">
+                <h3 class="auth-form-title">Welcome Back!</h3>
+                <div class="input-group">
+                    <label for="login-email">Email Address</label>
+                    <input type="email" id="login-email" placeholder="player@example.com" required autocomplete="email">
+                </div>
+                <div class="input-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" placeholder="••••••••" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="action-btn primary-btn auth-submit-btn">
+                    <span class="btn-icon">⚡</span> Sign In
+                </button>
+            </form>
+
+            <!-- Register Form -->
+            <form class="auth-form hidden" id="register-form">
+                <h3 class="auth-form-title">Create Account</h3>
+                <div class="input-group">
+                    <label for="reg-username">Username</label>
+                    <input type="text" id="reg-username" placeholder="RockSlayer99" required minlength="3" maxlength="15">
+                </div>
+                <div class="input-group">
+                    <label for="reg-email">Email Address</label>
+                    <input type="email" id="reg-email" placeholder="player@example.com" required autocomplete="email">
+                </div>
+                <div class="input-group">
+                    <label for="reg-password">Password</label>
+                    <input type="password" id="reg-password" placeholder="At least 6 characters" required minlength="6" autocomplete="new-password">
+                </div>
+                <button type="submit" class="action-btn primary-btn auth-submit-btn">
+                    <span class="btn-icon">🎮</span> Create Account
+                </button>
+            </form>
+
+            <div class="auth-feedback hidden" id="auth-feedback"></div>
+
+            <div class="modal-actions">
+                <button class="action-btn secondary-btn" id="close-auth-btn">
+                    <span class="btn-icon">❌</span> Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ====================================================================
+         2. MAIN MENU & MODE SELECTION (SINGLE PLAYER VS MULTIPLAYER)
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="mode-selection-overlay">
+        <div class="modal-card">
+            <!-- Home Page Header Bar with Top-Left Profile and Top-Right Ranks -->
+            <div class="home-top-nav">
+                <button class="top-nav-btn profile-nav-btn" id="open-profile-menu-btn">
+                    <span class="btn-icon">👤</span> Profile
+                </button>
+                <div class="nav-coins-pill" id="nav-coins-pill" title="Your Coin Balance">
+                    <span class="nav-coin-icon">🪙</span>
+                    <span class="nav-coin-amount" id="header-nav-coins">0</span>
+                </div>
+                <button class="top-nav-btn ranks-nav-btn" id="open-leaderboard-menu-btn">
+                    <span class="btn-icon">🏆</span> Ranks
+                </button>
+            </div>
+
+            <h2 class="modal-title">STONE • PAPER • SCISSORS</h2>
+            <p class="modal-subtitle">Select game type to start your battle!</p>
+
+            <!-- Mode Selector Switch: vs Computer or Online Multiplayer -->
+            <div class="game-type-tabs">
+                <button class="game-tab active" id="tab-sp-btn">🤖 VS Computer</button>
+                <button class="game-tab" id="tab-mp-btn">🌐 2-Player Online</button>
+            </div>
+
+            <!-- Single Player Mode Container -->
+            <div class="mode-options-container" id="sp-mode-container">
+                <button class="mode-card-btn" data-rounds="4">
+                    <span class="mode-badge-icon">🏆</span>
+                    <span class="mode-name">Best of 4</span>
+                    <span class="mode-desc">VS AI Computer</span>
+                </button>
+
+                <button class="mode-card-btn" data-rounds="6">
+                    <span class="mode-badge-icon">⚡</span>
+                    <span class="mode-name">Best of 6</span>
+                    <span class="mode-desc">VS AI Computer</span>
+                </button>
+
+                <button class="mode-card-btn" data-rounds="10">
+                    <span class="mode-badge-icon">🔥</span>
+                    <span class="mode-name">Best of 10</span>
+                    <span class="mode-desc">VS AI Computer</span>
+                </button>
+            </div>
+
+            <!-- Online Multiplayer Social Hub Container (Hidden initially) -->
+            <div class="mode-options-container hidden" id="mp-mode-container">
+                <!-- Social Tabs Navigation Header -->
+                <div class="social-tabs-nav">
+                    <button class="social-tab active" id="tab-friends-btn">
+                        <span>👥 Friends</span>
+                    </button>
+                    <button class="social-tab" id="tab-all-players-btn">
+                        <span>🌐 All Players</span>
+                    </button>
+                    <button class="social-tab" id="tab-requests-btn">
+                        <span>📩 Requests</span>
+                        <span class="requests-badge-count hidden" id="requests-badge-count">0</span>
+                    </button>
+                </div>
+
+                <!-- 1. Friends Panel (Default) -->
+                <div class="social-panel" id="social-friends-panel">
+                    <div class="social-search-box">
+                        <input type="text" id="friends-search-input" placeholder="🔍 Search Friends..." />
+                    </div>
+                    <div class="social-cards-list" id="friends-list-container">
+                        <div class="empty-state">Loading friends list...</div>
+                    </div>
+                </div>
+
+                <!-- 2. All Players Panel -->
+                <div class="social-panel hidden" id="social-all-players-panel">
+                    <div class="social-search-box">
+                        <input type="text" id="all-players-search-input" placeholder="🔍 Search Players..." />
+                    </div>
+                    <div class="social-cards-list" id="all-players-list-container">
+                        <div class="empty-state">Loading all players...</div>
+                    </div>
+                </div>
+
+                <!-- 3. Requests Panel -->
+                <div class="social-panel hidden" id="social-requests-panel">
+                    <div class="social-cards-list" id="requests-list-container">
+                        <div class="empty-state">No pending friend requests.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ====================================================================
+         3. CREATE ROOM MODAL OVERLAY
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="create-room-overlay">
+        <div class="modal-card">
+            <h2 class="modal-title">➕ CREATE MULTIPLAYER ROOM</h2>
+            <p class="modal-subtitle">Choose match format for your online battle</p>
+
+            <div class="input-group">
+                <label>Select Match Length</label>
+                <select class="room-select-input" id="create-mode-select">
+                    <option value="Best of 4">Best of 4 (First to 3 Wins)</option>
+                    <option value="Best of 6">Best of 6 (First to 4 Wins)</option>
+                    <option value="Best of 10">Best of 10 (First to 6 Wins)</option>
+                </select>
+            </div>
+
+            <!-- Virtual Coin Challenge Bet Selector -->
+            <div class="input-group" style="width: 100%; margin-top: 0.5rem;">
+                <label style="font-weight: 800; color: var(--accent-gold); display: flex; justify-content: space-between; align-items: center;">
+                    <span>⚔️ Choose Coin Bet (Optional)</span>
+                    <span style="font-size: 0.8rem; color: var(--text-muted);" id="create-user-coins-display">Your Balance: 🪙 0</span>
+                </label>
+                <div class="bet-chips-container" id="create-bet-chips">
+                    <button type="button" class="bet-chip active" data-bet="0">No Bet</button>
+                    <button type="button" class="bet-chip" data-bet="30">🪙 30</button>
+                    <button type="button" class="bet-chip" data-bet="50">🪙 50</button>
+                    <button type="button" class="bet-chip" data-bet="100">🪙 100</button>
+                    <button type="button" class="bet-chip" data-bet="500">🪙 500</button>
+                    <button type="button" class="bet-chip" data-bet="1000">🪙 1000</button>
+                </div>
+                <div class="bet-warning-text hidden" id="create-bet-warning">❌ Insufficient Coins. You need X more coins.</div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="confirm-create-room-btn">
+                    <span class="btn-icon">⚡</span> Create &amp; Host Room
+                </button>
+                <button class="action-btn secondary-btn" id="close-create-room-btn">
+                    <span class="btn-icon">❌</span> Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ====================================================================
+         4. JOIN ROOM MODAL OVERLAY
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="join-room-overlay">
+        <div class="modal-card">
+            <h2 class="modal-title">🔑 JOIN MULTIPLAYER ROOM</h2>
+            <p class="modal-subtitle">Enter the 6-character room code from host</p>
+
+            <div class="input-group">
+                <label for="join-code-input">Room Code</label>
+                <input type="text" id="join-code-input" placeholder="e.g. ROCK99" maxlength="6" style="text-transform: uppercase; text-align: center; font-size: 1.25rem; letter-spacing: 3px;">
+            </div>
+
+            <div class="auth-feedback hidden" id="join-feedback"></div>
+
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="confirm-join-room-btn">
+                    <span class="btn-icon">🎮</span> Join Room
+                </button>
+                <button class="action-btn secondary-btn" id="close-join-room-btn">
+                    <span class="btn-icon">❌</span> Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ====================================================================
+         5. MULTIPLAYER WAITING ROOM MODAL OVERLAY
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="waiting-room-overlay">
+        <div class="modal-card waiting-room-card">
+            <h2 class="modal-title">MULTPLAYER WAITING ROOM</h2>
+            <span class="info-pill mode-pill" id="waiting-mode-badge">MODE: BEST OF 4</span>
+
+
+
+            <!-- 2-Player Lobby Slots -->
+            <div class="lobby-players-grid">
+                <!-- Player 1 Slot -->
+                <div class="lobby-player-card" id="p1-lobby-card">
+                    <span class="p-avatar" id="p1-avatar">🥷</span>
+                    <span class="p-name" id="p1-name">Host Player</span>
+                    <span class="ready-status-badge" id="p1-status">Not Ready</span>
+                </div>
+
+                <div class="lobby-vs-badge">VS</div>
+
+                <!-- Player 2 Slot -->
+                <div class="lobby-player-card" id="p2-lobby-card">
+                    <span class="p-avatar" id="p2-avatar">❓</span>
+                    <span class="p-name" id="p2-name">Waiting for Player 2...</span>
+                    <span class="ready-status-badge" id="p2-status">Not Ready</span>
+                </div>
+            </div>
+
+            <!-- Waiting Room Actions -->
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="player-ready-btn">
+                    <span class="btn-icon">⚡</span> I'm Ready!
+                </button>
+                <button class="action-btn danger-btn" id="leave-room-btn">
+                    <span class="btn-icon">🚪</span> Leave Room
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ====================================================================
+         6. MATCH OVER / FINAL RESULTS SCREEN (SINGLE PLAYER & MULTIPLAYER)
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="match-end-overlay">
+        <div class="modal-card result-modal-card">
+            <div class="match-trophy-icon" id="match-trophy">🏆</div>
+            <h2 class="modal-title" id="match-result-title">YOU WON THE MATCH!</h2>
+            <p class="modal-subtitle" id="match-score-summary">Final Score: YOU 3 - 1 COMPUTER</p>
+
+            <!-- Match Rewards Banner -->
+            <div class="rewards-earned-banner" id="match-rewards-banner">
+                🎁 Earned: <strong id="match-xp-reward">+50 XP</strong> &amp; <strong id="match-coins-reward">+20 🪙</strong>
+            </div>
+
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="play-again-btn">
+                    <span class="btn-icon">🔄</span> Play Again
+                </button>
+                <button class="action-btn secondary-btn" id="back-to-menu-btn">
+                    <span class="btn-icon">🏠</span> Change Mode
+                </button>
+                <button class="action-btn secondary-btn hidden" id="open-history-end-btn">
+                    <span class="btn-icon">📜</span> History
+                </button>
+                <button class="action-btn secondary-btn hidden" id="open-stats-end-btn">
+                    <span class="btn-icon">📊</span> Stats
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====================================================================
+         7. PLAYER PROFILE MODAL OVERLAY
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="profile-overlay">
+        <div class="modal-card profile-modal-card">
+            
+            <!-- Profile Avatar & Identity Header -->
+            <div class="profile-avatar-wrapper">
+                <span class="profile-avatar-large">🥷</span>
+                <span class="profile-level-badge-large" id="profile-level-badge">LVL 1</span>
+            </div>
+
+            <h2 class="modal-title" id="profile-username-display">Guest Player</h2>
+            <div class="profile-rank-badge" id="profile-rank-title">Novice Fighter 🥷</div>
+
+            <!-- Profile XP Progress Bar -->
+            <div class="profile-xp-section">
+                <div class="xp-text-row">
+                    <span class="xp-title">Next Level Progress</span>
+                    <span class="xp-counter" id="profile-xp-text">0 / 100 XP</span>
+                </div>
+                <div class="xp-bar-track">
+                    <div class="xp-bar-fill" id="profile-xp-fill" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Total Coins Pill -->
+            <div class="profile-coins-display">
+                <span class="p-icon">🪙</span>
+                <span class="p-value" id="profile-coins">0</span>
+                <span class="p-label">Coins Collected</span>
+            </div>
+
+            <!-- Profile Navigation Tabs: Stats & History -->
+            <div class="profile-tabs">
+                <button class="profile-tab active" id="profile-tab-stats">📊 Stats</button>
+                <button class="profile-tab" id="profile-tab-history">📜 History</button>
+            </div>
+
+            <!-- Tab 1: Stats Section -->
+            <div class="profile-tab-content" id="profile-stats-section">
+                <div class="stats-grid">
+                    <div class="stat-box clickable-stat" id="stat-card-total-matches" role="button" tabindex="0" title="Click to view Total Matches details">
+                        <span class="stat-icon">🎮</span>
+                        <span class="stat-value" id="stat-total-matches">0</span>
+                        <span class="stat-label">Total Matches</span>
+                    </div>
+
+                    <div class="stat-box clickable-stat" id="stat-card-wins" role="button" tabindex="0" title="Click to view Wins details">
+                        <span class="stat-icon">🏆</span>
+                        <span class="stat-value" id="stat-matches-won">0</span>
+                        <span class="stat-label">Wins</span>
+                    </div>
+
+                    <div class="stat-box clickable-stat" id="stat-card-losses" role="button" tabindex="0" title="Click to view Losses details">
+                        <span class="stat-icon">💀</span>
+                        <span class="stat-value" id="stat-matches-lost">0</span>
+                        <span class="stat-label">Losses</span>
+                    </div>
+
+                    <div class="stat-box clickable-stat" id="stat-card-draws" role="button" tabindex="0" title="Click to view Draws details">
+                        <span class="stat-icon">🤝</span>
+                        <span class="stat-value" id="stat-matches-drawn">0</span>
+                        <span class="stat-label">Draws</span>
+                    </div>
+
+                    <div class="stat-box highlight-stat clickable-stat" id="stat-card-win-rate" role="button" tabindex="0" title="Click to view Win Rate details">
+                        <span class="stat-icon">📈</span>
+                        <span class="stat-value" id="stat-win-rate">0%</span>
+                        <span class="stat-label">Win Rate</span>
+                    </div>
+
+                    <div class="stat-box clickable-stat" id="stat-card-current-streak" role="button" tabindex="0" title="Click to view Current Streak details">
+                        <span class="stat-icon">🔥</span>
+                        <span class="stat-value" id="stat-current-streak">0</span>
+                        <span class="stat-label">Current Streak</span>
+                    </div>
+
+                    <div class="stat-box highlight-stat clickable-stat" id="stat-card-best-streak" role="button" tabindex="0" title="Click to view Best Streak details">
+                        <span class="stat-icon">👑</span>
+                        <span class="stat-value" id="stat-best-streak">0</span>
+                        <span class="stat-label">Best Streak</span>
+                    </div>
+
+                    <div class="stat-box clickable-stat" id="stat-card-rounds" role="button" tabindex="0" title="Click to view Total Rounds details">
+                        <span class="stat-icon">⏱️</span>
+                        <span class="stat-value" id="stat-total-rounds">0</span>
+                        <span class="stat-label">Total Rounds</span>
+                    </div>
+                </div>
+
+                <div class="profile-stats-actions">
+                    <button class="action-btn danger-btn" id="reset-stats-btn">
+                        <span class="btn-icon">🗑️</span> Reset Statistics
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tab 1 Sub-View: Stats Detail Section (Hidden by default) -->
+            <div class="profile-tab-content hidden" id="profile-stat-details-section">
+                <div class="profile-stat-details-container">
+                    <div class="profile-stat-details-header">
+                        <button class="back-to-stats-btn" id="back-to-stats-btn">
+                            <span>←</span> Back to Stats
+                        </button>
+                        <h3 class="details-title-heading" id="stat-details-title">Total Matches</h3>
+                    </div>
+                    <div id="profile-stat-details-content">
+                        <!-- Dynamic Match Cards / Total Rounds Breakdown rendered here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: History Section (Hidden by default) -->
+            <div class="profile-tab-content hidden" id="profile-history-section">
+                <div class="history-list-container" id="profile-history-list">
+                    <div class="empty-state">Loading match logs...</div>
+                </div>
+            </div>
+
+            <!-- Back to Home Action Button -->
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="close-profile-btn">
+                    <span class="btn-icon">←</span> Back to Game
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====================================================================
+         8. MATCH HISTORY SYSTEM (MODAL OVERLAY)
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="history-overlay">
+        <div class="modal-card history-modal-card">
+            <h2 class="modal-title">📜 MATCH HISTORY</h2>
+            <p class="modal-subtitle">Your Recent Battles Log (Stored in Cloud Firestore)</p>
+
+            <div class="history-list-container" id="history-list">
+                <div class="empty-state">No match history recorded yet. Complete a match to view logs!</div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="close-history-btn">
+                    <span class="btn-icon">❌</span> Close History
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====================================================================
+         9. GLOBAL LEADERBOARD (MODAL OVERLAY)
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="leaderboard-overlay">
+        <div class="modal-card leaderboard-modal-card">
+            <h2 class="modal-title">🏆 GLOBAL LEADERBOARD</h2>
+            <p class="modal-subtitle">Top Stone Paper Scissors Champions</p>
+
+            <div class="leaderboard-tabs">
+                <button class="lb-tab active" data-sort="wins">🏆 Wins</button>
+                <button class="lb-tab" data-sort="xp">⭐ XP</button>
+                <button class="lb-tab" data-sort="coins">🪙 Coins</button>
+            </div>
+
+            <div class="leaderboard-list-container" id="leaderboard-list">
+                <div class="empty-state">Loading champions data...</div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="close-leaderboard-btn">
+                    <span class="btn-icon">❌</span> Close Ranks
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====================================================================
+         10. STATISTICS PANEL (MODAL OVERLAY)
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="stats-overlay">
+        <div class="modal-card stats-modal-card">
+            <h2 class="modal-title">📊 PLAYER STATISTICS</h2>
+            <p class="modal-subtitle">Lifetime Battle Performance Records</p>
+
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <span class="stat-icon">🎮</span>
+                    <span class="stat-value" id="stat-total-matches">0</span>
+                    <span class="stat-label">Total Matches</span>
+                </div>
+
+                <div class="stat-box">
+                    <span class="stat-icon">🏆</span>
+                    <span class="stat-value" id="stat-matches-won">0</span>
+                    <span class="stat-label">Matches Won</span>
+                </div>
+
+                <div class="stat-box">
+                    <span class="stat-icon">💀</span>
+                    <span class="stat-value" id="stat-matches-lost">0</span>
+                    <span class="stat-label">Matches Lost</span>
+                </div>
+
+                <div class="stat-box">
+                    <span class="stat-icon">🤝</span>
+                    <span class="stat-value" id="stat-matches-drawn">0</span>
+                    <span class="stat-label">Match Draws</span>
+                </div>
+
+                <div class="stat-box">
+                    <span class="stat-icon">⏱️</span>
+                    <span class="stat-value" id="stat-total-rounds">0</span>
+                    <span class="stat-label">Total Rounds</span>
+                </div>
+
+                <div class="stat-box highlight-stat">
+                    <span class="stat-icon">📈</span>
+                    <span class="stat-value" id="stat-win-rate">0%</span>
+                    <span class="stat-label">Win Rate</span>
+                </div>
+
+                <div class="stat-box">
+                    <span class="stat-icon">🔥</span>
+                    <span class="stat-value" id="stat-current-streak">0</span>
+                    <span class="stat-label">Current Streak</span>
+                </div>
+
+                <div class="stat-box highlight-stat">
+                    <span class="stat-icon">👑</span>
+                    <span class="stat-value" id="stat-best-streak">0</span>
+                    <span class="stat-label">Best Streak</span>
+                </div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="action-btn danger-btn" id="reset-stats-btn">
+                    <span class="btn-icon">🗑️</span> Reset Statistics
+                </button>
+                <button class="action-btn primary-btn" id="close-stats-btn">
+                    <span class="btn-icon">❌</span> Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ====================================================================
+         11. MAIN GAME ARENA CONTAINER (SINGLE PLAYER & MULTIPLAYER)
+         ==================================================================== -->
+    <div class="game-container hidden" id="game-container">
+        
+        <!-- Header Section: Game Title and Subtitle -->
+        <header class="game-header">
+            <h1 class="game-title">STONE • PAPER • SCISSORS</h1>
+            <p class="game-subtitle" id="arena-subtitle">Choose your move and defeat the computer!</p>
+
+            <!-- Pre-Game Bet Match Banner -->
+            <div class="bet-match-banner hidden" id="bet-match-banner">
+                <span class="b-icon">⚔️</span>
+                <span class="b-text">BET MATCH: YOU <strong id="bet-my-stake">🪙 0</strong> Locked vs OPPONENT <strong id="bet-opp-stake">🪙 0</strong> Locked • POT: <strong id="bet-total-pot" style="color: var(--accent-gold);">🪙 0</strong></span>
+            </div>
+
+            <!-- Mode & Round Tracker Bar -->
+            <div class="match-info-bar">
+                <span class="info-pill mode-pill" id="mode-display-badge">MODE: BEST OF 4</span>
+                <span class="info-pill round-pill" id="round-display-badge">ROUND 1 / 4</span>
+            </div>
+        </header>
+
+        <!-- Main Game Arena -->
+        <main class="game-arena">
+            
+            <!-- Players Display Section -->
+            <section class="players-section" aria-label="Player Arena">
+                
+                <!-- Player 1 / User Section -->
+                <div class="player-card" id="user-card">
+                    <h2 class="player-label" id="user-card-label">YOU</h2>
+                    <div class="move-display" id="user-move-display" title="Your Move">❓</div>
+                    <div class="score-card">
+                        <span class="score-label" id="user-score-label">Your Score:</span>
+                        <span class="score-value" id="user-score">0</span>
+                    </div>
+                </div>
+
+                <!-- Central VS Section -->
+                <div class="vs-section">
+                    <div class="vs-badge">VS</div>
+                </div>
+
+                <!-- Player 2 / Computer Section -->
+                <div class="player-card" id="computer-card">
+                    <h2 class="player-label" id="computer-card-label">COMPUTER</h2>
+                    <div class="move-display" id="computer-move-display" title="Opponent Move">❓</div>
+                    <div class="score-card">
+                        <span class="score-label" id="computer-score-label">Computer Score:</span>
+                        <span class="score-value" id="computer-score">0</span>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- Result Announcement Area -->
+            <section class="result-section">
+                <div class="result-box" id="result-message">
+                    Make your move!
+                </div>
+            </section>
+
+            <!-- Player Choice Buttons Section -->
+            <section class="choices-section" aria-label="Choice Selection">
+                <button class="choice-btn" id="btn-stone" data-choice="stone" aria-label="Choose Stone">
+                    <span class="choice-icon">✊</span>
+                    <span class="choice-name">Stone</span>
+                </button>
+
+                <button class="choice-btn" id="btn-paper" data-choice="paper" aria-label="Choose Paper">
+                    <span class="choice-icon">✋</span>
+                    <span class="choice-name">Paper</span>
+                </button>
+
+                <button class="choice-btn" id="btn-scissors" data-choice="scissors" aria-label="Choose Scissors">
+                    <span class="choice-icon">✌️</span>
+                    <span class="choice-name">Scissors</span>
+                </button>
+            </section>
+
+            <!-- Game Control Section -->
+            <section class="controls-section">
+                <button class="reset-btn" id="reset-btn">
+                    <span class="reset-icon">🔄</span> Reset Match
+                </button>
+                <button class="reset-btn stats-arena-btn" id="open-stats-arena-btn">
+                    <span class="reset-icon">📊</span> Stats
+                </button>
+                <button class="reset-btn profile-arena-btn" id="open-history-arena-btn">
+                    <span class="reset-icon">📜</span> History
+                </button>
+                <button class="reset-btn menu-btn" id="in-game-menu-btn">
+                    <span class="reset-icon">🏠</span> Menu
+                </button>
+            </section>
+
+        </main>
+
+        <!-- Footer Section -->
+        <footer class="game-footer">
+            <p>Designed for Ultimate Gaming Experience • Powered by Socket.IO, Node.js &amp; Firebase</p>
+        </footer>
+
+    </div>
+
+    <!-- ====================================================================
+         DAILY REWARD MODAL OVERLAY
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="daily-reward-overlay">
+        <div class="modal-card daily-reward-modal-card">
+            <div class="match-trophy-icon">🎁</div>
+            <h2 class="modal-title">DAILY REWARD</h2>
+            <p class="modal-subtitle">Log in every day to claim bonus virtual coins!</p>
+            <div class="daily-reward-badge" id="daily-reward-amount-badge">+10 🪙</div>
+            <div id="daily-reward-status-msg" style="font-size: 0.9rem; font-weight: 700; color: #10b981;" class="hidden">
+                ✅ Today's reward already claimed
+            </div>
+            <div class="modal-actions" id="daily-reward-actions" style="margin-top: 0.5rem;">
+                <button class="action-btn primary-btn" id="claim-daily-reward-btn">
+                    <span class="btn-icon">🎁</span> Claim Reward
+                </button>
+                <button class="action-btn secondary-btn hidden" id="close-daily-reward-btn">
+                    <span class="btn-icon">❌</span> Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====================================================================
+         INCOMING FRIEND CHALLENGE OVERLAY
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="incoming-challenge-overlay">
+        <div class="modal-card challenge-modal-card">
+            <div class="match-trophy-icon">⚔️</div>
+            <h2 class="modal-title">FRIEND CHALLENGE</h2>
+            <p class="modal-subtitle"><strong id="incoming-challenger-name" style="color: var(--accent-cyan);">Friend</strong> wants to challenge you to a Betting Match!</p>
+
+            <div class="challenge-bet-info-card" style="background: rgba(0,0,0,0.3); padding: 0.85rem; border-radius: var(--radius-md); border: 1px solid rgba(255,255,255,0.1); width: 100%; display: flex; flex-direction: column; gap: 0.4rem; text-align: left; font-size: 0.85rem;">
+                <div style="display: flex; justify-content: space-between;">
+                    <span style="color: var(--text-muted);">Match Format:</span>
+                    <strong style="color: #ffffff;" id="incoming-challenge-mode">Best of 4</strong>
+                </div>
+                <div style="display: flex; justify-content: space-between;">
+                    <span style="color: var(--text-muted);">Bet Stake:</span>
+                    <strong style="color: var(--accent-gold);" id="incoming-challenge-bet">🪙 100 Coins</strong>
+                </div>
+                <div style="display: flex; justify-content: space-between;">
+                    <span style="color: var(--text-muted);">Potential Winner Pot:</span>
+                    <strong style="color: var(--accent-cyan);" id="incoming-challenge-pot">🪙 200 Coins</strong>
+                </div>
+            </div>
+
+            <div class="bet-warning-text hidden" id="incoming-challenge-warning" style="color: #f43f5e; font-size: 0.8rem; font-weight: 700;">❌ Insufficient Coins. You need X more coins to accept.</div>
+
+            <div class="modal-actions">
+                <button class="action-btn primary-btn" id="accept-challenge-btn">
+                    <span class="btn-icon">✅</span> Accept
+                </button>
+                <button class="action-btn danger-btn" id="decline-challenge-btn">
+                    <span class="btn-icon">❌</span> Decline
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====================================================================
+         FRIEND CHALLENGE CONFIGURATION MODAL
+         ==================================================================== -->
+    <div class="overlay-modal hidden" id="friend-challenge-config-modal">
+        <div class="modal-card challenge-modal-card">
+            <div class="match-trophy-icon">⚔️</div>
+            <h2 class="modal-title">CHALLENGE FRIEND</h2>
+            <p class="modal-subtitle">Configure battle settings for <strong id="challenge-target-username" style="color: var(--accent-cyan);">Friend</strong></p>
+
+            <div class="input-group" style="width: 100%; margin-top: 0.5rem; text-align: left;">
+                <label style="font-weight: 800; color: #ffffff;">Select Match Format</label>
+                <div class="mode-chips-container" id="challenge-mode-chips" style="display: flex; gap: 0.4rem; margin-top: 0.3rem;">
+                    <button type="button" class="mode-chip active" data-mode="Best of 4" style="flex: 1; padding: 0.5rem 0.2rem; font-size: 0.8rem; font-weight: 800;">🏆 Best of 4</button>
+                    <button type="button" class="mode-chip" data-mode="Best of 6" style="flex: 1; padding: 0.5rem 0.2rem; font-size: 0.8rem; font-weight: 800;">⚡ Best of 6</button>
+                    <button type="button" class="mode-chip" data-mode="Best of 10" style="flex: 1; padding: 0.5rem 0.2rem; font-size: 0.8rem; font-weight: 800;">🔥 Best of 10</button>
+                </div>
+            </div>
+
+            <div class="input-group" style="width: 100%; margin-top: 0.5rem; text-align: left;">
+                <label style="font-weight: 800; color: var(--accent-gold); display: flex; justify-content: space-between; align-items: center;">
+                    <span>Bet Coins</span>
+                    <span style="font-size: 0.8rem; color: var(--text-muted);" id="challenge-user-balance-display">Your Balance: 🪙 0</span>
+                </label>
+                <div class="bet-chips-container" id="challenge-bet-chips">
+                    <button type="button" class="bet-chip active" data-bet="30">🪙 30</button>
+                    <button type="button" class="bet-chip" data-bet="50">🪙 50</button>
+                    <button type="button" class="bet-chip" data-bet="100">🪙 100</button>
+                    <button type="button" class="bet-chip" data-bet="500">🪙 500</button>
+                    <button type="button" class="bet-chip" data-bet="1000">🪙 1000</button>
+                </div>
+                <div class="bet-warning-text hidden" id="challenge-bet-warning">❌ Insufficient Coins. You need X more coins.</div>
+            </div>
+
+            <div class="modal-actions" style="margin-top: 0.8rem;">
+                <button class="action-btn primary-btn" id="send-direct-challenge-btn">
+                    <span class="btn-icon">⚔️</span> Send Challenge
+                </button>
+                <button class="action-btn secondary-btn" id="close-challenge-config-btn">
+                    <span class="btn-icon">❌</span> Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- External JavaScript Module File -->
+    <script type="module" src="script.js"></script>
+</body>
+</html>

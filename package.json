@@ -1,0 +1,26 @@
+{
+  "name": "stone-paper-scissors-firebase",
+  "version": "1.0.0",
+  "description": "Full-stack Stone Paper Scissors game with Node.js Express backend, Vanilla JavaScript frontend, Firebase Authentication, and Cloud Firestore.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "express",
+    "firebase",
+    "firestore",
+    "game",
+    "javascript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.1",
+    "socket.io": "^4.8.3"
+  }
+}

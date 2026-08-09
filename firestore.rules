@@ -1,0 +1,73 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ====================================================================
+    // 1. USERS COLLECTION SECURITY RULES
+    // Document ID: userId (Matches the user's Auth UID)
+    // ====================================================================
+    match /users/{userId} {
+      // Authenticated users can read player profiles (required for Leaderboards and Stats)
+      allow read: if request.auth != null;
+
+      // Only the authenticated user can create their own profile document
+      allow create: if request.auth != null && request.auth.uid == userId;
+
+      // Authenticated users can update user documents (required for atomic match bet settlements between players)
+      allow update: if request.auth != null;
+
+      // Deleting profiles is restricted
+      allow delete: if false;
+    }
+
+    // ====================================================================
+    // BET SETTLEMENTS COLLECTION SECURITY RULES
+    // Document ID: matchId
+    // ====================================================================
+    match /bet_settlements/{matchId} {
+      allow read, create, update: if request.auth != null;
+    }
+
+    // ====================================================================
+    // 2. MATCHES COLLECTION SECURITY RULES
+    // Document ID: Auto-generated match ID
+    // ====================================================================
+    match /matches/{matchId} {
+      // Authenticated users can read match history
+      allow read: if request.auth != null;
+
+      // Authenticated players can record their completed match results
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+
+      // Completed match records are immutable (cannot be altered or deleted)
+      allow update, delete: if false;
+    }
+
+    // ====================================================================
+    // 3. CHALLENGES COLLECTION SECURITY RULES
+    // ====================================================================
+    match /challenges/{challengeId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.creatorId == request.auth.uid;
+      allow update: if request.auth != null;
+    }
+
+    // ====================================================================
+    // 4. TRANSACTIONS COLLECTION SECURITY RULES
+    // ====================================================================
+    match /transactions/{txId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+    }
+
+    // ====================================================================
+    // 5. FRIENDS COLLECTION SECURITY RULES
+    // ====================================================================
+    match /friends/{friendId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update, delete: if request.auth != null;
+    }
+  }
+}
