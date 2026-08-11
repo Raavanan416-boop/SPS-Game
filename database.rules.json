@@ -1,12 +1,14 @@
 {
   "rules": {
     "users": {
+      ".read": "auth != null",
       "$uid": {
         ".read": "auth != null",
         ".write": "auth != null && auth.uid === $uid"
       }
     },
     "status": {
+      ".read": "auth != null",
       "$uid": {
         ".read": "auth != null",
         ".write": "auth != null && auth.uid === $uid"
@@ -27,12 +29,16 @@
       }
     },
     "challenges": {
+      ".read": "auth != null",
+      ".write": "auth != null",
       "$uid": {
         ".read": "auth != null",
         ".write": "auth != null"
       }
     },
     "matches": {
+      ".read": "auth != null",
+      ".write": "auth != null",
       "$matchId": {
         ".read": "auth != null",
         ".write": "auth != null"

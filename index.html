@@ -11,8 +11,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&display=swap" rel="stylesheet">
     
-    <!-- Socket.IO Client Library (CDN for Vercel/Static Hosting compatibility) -->
-    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <!-- Socket.IO Client Library (CDN for Vercel/Static Hosting compatibility with CDN fallback) -->
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js" onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.8.1/socket.io.min.js';"></script>
 
     <!-- External CSS Stylesheet -->
     <link rel="stylesheet" href="style.css">
@@ -615,7 +615,7 @@
             <!-- Pre-Game Bet Match Banner -->
             <div class="bet-match-banner hidden" id="bet-match-banner">
                 <span class="b-icon">⚔️</span>
-                <span class="b-text">BET MATCH: YOU <strong id="bet-my-stake">🪙 0</strong> Locked vs OPPONENT <strong id="bet-opp-stake">🪙 0</strong> Locked • POT: <strong id="bet-total-pot" style="color: var(--accent-gold);">🪙 0</strong></span>
+                <span class="b-text">BET MATCH: <strong id="bet-total-pot" style="color: var(--accent-gold);">🪙 0</strong></span>
             </div>
 
             <!-- Mode & Round Tracker Bar -->
@@ -700,11 +700,6 @@
             </section>
 
         </main>
-
-        <!-- Footer Section -->
-        <footer class="game-footer">
-            <p>Designed for Ultimate Gaming Experience • Powered by Socket.IO, Node.js &amp; Firebase</p>
-        </footer>
 
     </div>
 

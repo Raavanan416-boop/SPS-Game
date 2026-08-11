@@ -35,7 +35,14 @@ import {
 } from './firebase-config.js';
 
 // Initialize Socket.IO Client safely (compatible with static hosts & live backend)
-const socket = (typeof io !== 'undefined') ? io({ autoConnect: true, reconnectionAttempts: 5, timeout: 5000 }) : null;
+const dummySocket = {
+    on: () => {},
+    off: () => {},
+    emit: () => {},
+    once: () => {},
+    id: null
+};
+const socket = (typeof io !== 'undefined' && typeof io === 'function') ? (io({ autoConnect: true, reconnectionAttempts: 5, timeout: 5000 }) || dummySocket) : dummySocket;
 
 /**
  * --------------------------------------------------------------------------
@@ -199,6 +206,23 @@ const PROGRESSION_STORAGE_KEY = 'stone_paper_scissors_progression_v1';
 let currentUser = null;
 let userProfileData = null;
 
+let userDocUnsubscribe = null;
+let allUsersUnsubscribe = null;
+let friendships1Unsubscribe = null;
+let friendships2Unsubscribe = null;
+let q1FriendshipsMap = new Map();
+let q2FriendshipsMap = new Map();
+
+let onlineUserUidsSet = new Set();
+let socketOnlineUidsSet = new Set();
+let rtdbOnlineUidsSet = new Set();
+
+let allRegisteredUsersList = [];
+let userFriendshipsList = [];
+var lastLoadUsersError = null;
+if (typeof window !== 'undefined') window.lastLoadUsersError = null;
+let selectedChallengeTargetFriend = null;
+
 let isMultiplayerMode = false; // Single Player vs Online Multiplayer flag
 let currentRoomCode = null;
 let currentRoomData = null;
@@ -245,6 +269,31 @@ onAuthStateChanged(auth, async (user) => {
 
         await syncUserFromFirestore(user);
     } else {
+        // IMPORTANT: Clean up listeners BEFORE clearing currentUser reference
+        // (Fix: the old code set currentUser=null first, then checked if(currentUser) which was always false)
+        const previousUser = currentUser;
+        const logoutUid = previousUser ? previousUser.uid : null;
+
+        // Clean up all Firebase listeners while we still have the UID
+        if (logoutUid) {
+            if (userDocUnsubscribe) {
+                userDocUnsubscribe();
+                userDocUnsubscribe = null;
+            }
+            if (allUsersUnsubscribe) { allUsersUnsubscribe(); allUsersUnsubscribe = null; }
+            if (friendships1Unsubscribe) { friendships1Unsubscribe(); friendships1Unsubscribe = null; }
+            if (friendships2Unsubscribe) { friendships2Unsubscribe(); friendships2Unsubscribe = null; }
+            if (rtdbUsersListenerUnsub) { rtdbUsersListenerUnsub(); rtdbUsersListenerUnsub = null; }
+            if (rtdbStatusListenerUnsub) { rtdbStatusListenerUnsub(); rtdbStatusListenerUnsub = null; }
+            if (rtdbIncomingChallengesUnsub) { rtdbIncomingChallengesUnsub(); rtdbIncomingChallengesUnsub = null; }
+            q1FriendshipsMap.clear();
+            q2FriendshipsMap.clear();
+            cleanupRtdbPresence();
+            rtdbSet(rtdbRef(rtdb, `status/${logoutUid}/state`), 'offline').catch(() => {});
+            unregisterCurrentPresence(logoutUid);
+        }
+
+        // NOW clear state
         currentUser = null;
         userProfileData = null;
         console.log('🔓 Guest User (Logged out)');
@@ -268,26 +317,9 @@ onAuthStateChanged(auth, async (user) => {
 
         authOverlay.classList.remove('hidden');
 
-        if (currentUser) {
-            const logoutUid = currentUser.uid;
-            if (userDocUnsubscribe) {
-                userDocUnsubscribe();
-                userDocUnsubscribe = null;
-            }
-            if (allUsersUnsubscribe) { allUsersUnsubscribe(); allUsersUnsubscribe = null; }
-            if (friendships1Unsubscribe) { friendships1Unsubscribe(); friendships1Unsubscribe = null; }
-            if (friendships2Unsubscribe) { friendships2Unsubscribe(); friendships2Unsubscribe = null; }
-            q1FriendshipsMap.clear();
-            q2FriendshipsMap.clear();
-            cleanupRtdbPresence();
-            rtdbSet(rtdbRef(rtdb, `status/${logoutUid}/state`), 'offline').catch(() => {});
-            unregisterCurrentPresence(logoutUid);
-        }
-
-        currentUser = null;
-        userProfileData = null;
         allRegisteredUsersList = [];
         userFriendshipsList = [];
+        lastLoadUsersError = null;
         loadLocalStorageData();
         renderProgressionUI();
         renderStatsUI();
@@ -296,8 +328,6 @@ onAuthStateChanged(auth, async (user) => {
         renderRequestsTab();
     }
 });
-
-let userDocUnsubscribe = null;
 
 async function syncUserFromFirestore(user) {
     try {
@@ -363,9 +393,10 @@ async function syncUserFromFirestore(user) {
             console.error('Error in realtime user document snapshot listener:', err);
         });
 
-        // Register presence and load social hub data for logged-in user
+        // Register presence and load social data for logged-in user
         initRtdbPresence(user.uid);
         subscribeGlobalRtdbPresence();
+        subscribeIncomingRtdbChallenges(user.uid);
         registerCurrentPresence();
         await loadSocialData();
     } catch (e) {
@@ -579,6 +610,11 @@ async function loadLeaderboard(sortBy = 'wins') {
 // 1. Connection Event
 socket.on('connect', () => {
     console.log('⚡ Connected to Socket.IO Multiplayer Server! Socket ID:', socket.id);
+    if (currentUser) {
+        registerCurrentPresence();
+        initRtdbPresence(currentUser.uid);
+        subscribeGlobalRtdbPresence();
+    }
 });
 
 // 2. Room Created Callback
@@ -672,21 +708,21 @@ socket.on('startCountdown', ({ room }) => {
     const me = isHost ? p1 : p2;
     const opponent = isHost ? p2 : p1;
 
-    userCardLabel.textContent = 'YOU';
-    computerCardLabel.textContent = 'OPPONENT';
-    userScoreLabel.textContent = 'YOU:';
-    computerScoreLabel.textContent = 'OPPONENT:';
-    arenaSubtitle.textContent = `Real-Time Match against ${opponent.username}!`;
+    const myName = me ? (me.username || me.name) : 'Player 1';
+    const oppName = opponent ? (opponent.username || opponent.name) : 'Player 2';
+
+    userCardLabel.textContent = myName;
+    computerCardLabel.textContent = oppName;
+    userScoreLabel.textContent = `${myName}:`;
+    computerScoreLabel.textContent = `${oppName}:`;
+    arenaSubtitle.textContent = `Real-Time Match: ${myName} VS ${oppName}`;
 
     // Show Bet Match Banner if this is a bet match
     const betBanner = document.getElementById('bet-match-banner');
-    if (room.betAmount && room.betAmount > 0 && betBanner) {
-        const betMyStake = document.getElementById('bet-my-stake');
-        const betOppStake = document.getElementById('bet-opp-stake');
+    const potAmount = room.pot || (room.betAmount ? room.betAmount * 2 : 0);
+    if (potAmount > 0 && betBanner) {
         const betTotalPot = document.getElementById('bet-total-pot');
-        if (betMyStake) betMyStake.textContent = `🪙 ${room.betAmount}`;
-        if (betOppStake) betOppStake.textContent = `🪙 ${room.betAmount}`;
-        if (betTotalPot) betTotalPot.textContent = `🪙 ${room.betAmount * 2}`;
+        if (betTotalPot) betTotalPot.textContent = `🪙 ${potAmount}`;
         betBanner.classList.remove('hidden');
     } else if (betBanner) {
         betBanner.classList.add('hidden');
@@ -734,17 +770,55 @@ socket.on('startRoundChoices', ({ room }) => {
     toggleChoiceButtons(false);
 });
 
-// 8. Round Result Callback (Server-Side Decision Received)
-socket.on('roundResult', ({ p1Choice, p2Choice, p1Score, p2Score, outcome, currentRound }) => {
+// 7b. Choice Submitted Event (Acknowledge to local player)
+socket.off('choiceSubmitted');
+socket.on('choiceSubmitted', ({ choice }) => {
+    toggleChoiceButtons(true);
+    const choiceName = choice ? (choice.charAt(0).toUpperCase() + choice.slice(1)) : 'choice';
+    resultMessageElement.textContent = `You selected ${choiceName} • Waiting for opponent...`;
+});
+
+// 7c. Opponent Choice Submitted Event (Notify player waiting to choose)
+socket.off('opponentChoiceSubmitted');
+socket.on('opponentChoiceSubmitted', ({ username }) => {
+    const isLocalSubmitted = Array.from(choiceButtons).some(btn => btn.disabled);
+    if (!isLocalSubmitted) {
+        resultMessageElement.textContent = `${username || 'Opponent'} has submitted their choice! Make your move!`;
+    } else {
+        resultMessageElement.textContent = `Opponent has chosen • Waiting for result...`;
+    }
+});
+
+// 7d. Next Round Transition Event (Requirement 11)
+socket.off('nextRound');
+socket.on('nextRound', ({ currentRound, room }) => {
+    clearVisualEffects();
+    userMoveDisplay.textContent = '❓';
+    computerMoveDisplay.textContent = '❓';
+    resultMessageElement.textContent = 'Make your move!';
+    roundDisplayBadge.textContent = `ROUND ${currentRound}`;
+
+    if (room) {
+        currentRoomData = room;
+    }
+
+    animateResultText('FIGHT!', 'fight-pulse');
+    toggleChoiceButtons(false);
+});
+
+// 8. Round Result Callback (Server-Side Decision Received - Requirement 7 & 8)
+socket.off('roundResult');
+socket.on('roundResult', ({ p1Choice, p2Choice, p1Score, p2Score, outcome, currentRound, p1Uid, p1Name, p2Uid, p2Name, winnerName }) => {
     toggleChoiceButtons(true);
 
-    const isHost = socket.id === currentRoomData.players[0].socketId;
+    const isHost = checkIsPlayerA();
+
     const myChoice = isHost ? p1Choice : p2Choice;
     const oppChoice = isHost ? p2Choice : p1Choice;
     const myScore = isHost ? p1Score : p2Score;
     const oppScore = isHost ? p2Score : p1Score;
 
-    // Reveal choices with 3D Pop
+    // Reveal BOTH choices simultaneously on BOTH clients (Requirement 8)
     animateMoveReveal(userMoveDisplay, moveEmojis[myChoice]);
     animateMoveReveal(computerMoveDisplay, moveEmojis[oppChoice]);
 
@@ -754,29 +828,26 @@ socket.on('roundResult', ({ p1Choice, p2Choice, p1Score, p2Score, outcome, curre
     clearVisualEffects();
     resultMessageElement.classList.add('result-shake');
 
-    gameStats.totalRoundsPlayed++;
-    saveLocalStorageData();
-
     let myOutcome = 'draw';
     if (outcome === 'p1') myOutcome = isHost ? 'win' : 'lose';
     if (outcome === 'p2') myOutcome = isHost ? 'lose' : 'win';
 
+    // REPLACE stuck message immediately with round winner message (Requirement 9)
     if (myOutcome === 'win') {
-        resultMessageElement.textContent = 'YOU WIN ROUND!';
+        resultMessageElement.textContent = `🎉 You win Round ${currentRound}!`;
         resultMessageElement.classList.add('result-win');
         userCard.classList.add('winner');
         computerCard.classList.add('loser');
     } else if (myOutcome === 'lose') {
-        resultMessageElement.textContent = 'OPPONENT WINS ROUND!';
+        resultMessageElement.textContent = `🏆 ${winnerName || 'Opponent'} wins Round ${currentRound}!`;
         resultMessageElement.classList.add('result-lose');
         computerCard.classList.add('computer-winner');
         userCard.classList.add('loser');
     } else {
-        resultMessageElement.textContent = 'ROUND DRAW!';
+        resultMessageElement.textContent = `🤝 Round ${currentRound} Draw!`;
         resultMessageElement.classList.add('result-draw');
     }
 
-    // Advance Round Counter display
     roundDisplayBadge.textContent = `ROUND ${currentRound}`;
 });
 
@@ -919,26 +990,43 @@ socket.on('matchFinished', async ({ roomCode, winner, loser, isTie, p1Score, p2S
 });
 
 // 10. Player Disconnected Callback
-socket.on('playerDisconnected', ({ message, room }) => {
+socket.on('playerDisconnected', async ({ message, room }) => {
     alert(message || 'Opponent disconnected.');
     currentRoomData = room;
-    gameContainer.classList.add('hidden');
-    matchEndOverlay.classList.add('hidden');
+    if (gameContainer) gameContainer.classList.add('hidden');
+    if (matchEndOverlay) matchEndOverlay.classList.add('hidden');
+
+    const betAmount = (currentRoomData && currentRoomData.betAmount) || 0;
+    if (betAmount > 0 && currentUser && currentRoomData && currentRoomData.status !== 'finished') {
+        try {
+            await refundLockedBet(betAmount);
+            console.log(`🔓 Bet refunded due to opponent disconnect: +${betAmount} coins`);
+        } catch (e) {
+            console.error('Error refunding bet on disconnect:', e);
+        }
+    }
+
+    const betBanner = document.getElementById('bet-match-banner');
+    if (betBanner) betBanner.classList.add('hidden');
 
     // Update waiting room player card
-    const p1 = room.players[0];
+    const p1 = room ? room.players[0] : null;
     if (p1) {
-        p1Name.textContent = p1.username;
-        p1Avatar.textContent = p1.avatar || '🥷';
-        p1Status.textContent = 'Not Ready';
-        p1Status.classList.remove('ready');
+        if (p1Name) p1Name.textContent = p1.username;
+        if (p1Avatar) p1Avatar.textContent = p1.avatar || '🥷';
+        if (p1Status) {
+            p1Status.textContent = 'Not Ready';
+            p1Status.classList.remove('ready');
+        }
     }
-    p2Name.textContent = 'Waiting for Player 2...';
-    p2Avatar.textContent = '❓';
-    p2Status.textContent = 'Not Ready';
-    p2Status.classList.remove('ready');
+    if (p2Name) p2Name.textContent = 'Waiting for Player 2...';
+    if (p2Avatar) p2Avatar.textContent = '❓';
+    if (p2Status) {
+        p2Status.textContent = 'Not Ready';
+        p2Status.classList.remove('ready');
+    }
 
-    waitingRoomOverlay.classList.remove('hidden');
+    if (waitingRoomOverlay) waitingRoomOverlay.classList.remove('hidden');
 });
 
 // 11. Rematch Started Callback
@@ -1035,14 +1123,18 @@ function renderStatsUI() {
     const total = gameStats.totalMatches;
     const winRate = total > 0 ? ((gameStats.matchesWon / total) * 100).toFixed(1) + '%' : '0%';
 
-    document.getElementById('stat-total-matches').textContent = gameStats.totalMatches;
-    document.getElementById('stat-matches-won').textContent = gameStats.matchesWon;
-    document.getElementById('stat-matches-lost').textContent = gameStats.matchesLost;
-    document.getElementById('stat-matches-drawn').textContent = gameStats.matchesDrawn;
-    document.getElementById('stat-total-rounds').textContent = gameStats.totalRoundsPlayed;
-    document.getElementById('stat-win-rate').textContent = winRate;
-    document.getElementById('stat-current-streak').textContent = gameStats.currentStreak;
-    document.getElementById('stat-best-streak').textContent = gameStats.bestStreak;
+    const setAllText = (id, val) => {
+        document.querySelectorAll(`#${id}`).forEach(el => el.textContent = val);
+    };
+
+    setAllText('stat-total-matches', gameStats.totalMatches);
+    setAllText('stat-matches-won', gameStats.matchesWon);
+    setAllText('stat-matches-lost', gameStats.matchesLost);
+    setAllText('stat-matches-drawn', gameStats.matchesDrawn);
+    setAllText('stat-total-rounds', gameStats.totalRoundsPlayed);
+    setAllText('stat-win-rate', winRate);
+    setAllText('stat-current-streak', gameStats.currentStreak);
+    setAllText('stat-best-streak', gameStats.bestStreak);
 }
 
 function awardMatchRewards(outcome) {
@@ -1167,6 +1259,18 @@ function determineWinner(player, computer) {
     }
 
     return 'computer';
+}
+
+function calculateServerWinner(c1, c2) {
+    if (c1 === c2) return 'draw';
+    if (
+        (c1 === 'stone' && c2 === 'scissors') ||
+        (c1 === 'scissors' && c2 === 'paper') ||
+        (c1 === 'paper' && c2 === 'stone')
+    ) {
+        return 'p1';
+    }
+    return 'p2';
 }
 
 function animateResultText(text, animationClass) {
@@ -1439,6 +1543,26 @@ modeButtons.forEach(button => {
     });
 });
 
+function checkIsPlayerA() {
+    if (!currentUser) return false;
+    if (!currentRoomData) return true;
+
+    // Check RTDB structure (playerA)
+    if (currentRoomData.playerA && currentRoomData.playerA.uid) {
+        return currentRoomData.playerA.uid === currentUser.uid;
+    }
+
+    // Check Socket.IO structure (players array)
+    if (currentRoomData.players && currentRoomData.players.length > 0) {
+        const p1 = currentRoomData.players[0];
+        if (p1 && p1.uid) {
+            return p1.uid === currentUser.uid;
+        }
+    }
+
+    return true;
+}
+
 // Choice Buttons Event Listeners (Single Player or Multiplayer)
 choiceButtons.forEach(button => {
     button.addEventListener('click', () => {
@@ -1447,11 +1571,34 @@ choiceButtons.forEach(button => {
 
         const userChoice = button.getAttribute('data-choice');
 
-        if (isMultiplayerMode && currentRoomCode) {
-            // Submit choice securely to Socket.IO server
-            socket.emit('playerChoice', { roomCode: currentRoomCode, choice: userChoice });
+        if (isMultiplayerMode && (currentRoomCode || currentMatchId)) {
+            const uid = currentUser ? currentUser.uid : socket.id;
+
+            // Show local choice immediately on local player move card (Requirement 1)
+            userMoveDisplay.textContent = moveEmojis[userChoice] || '❓';
+
+            // Disable choice buttons immediately (Requirement 3)
             toggleChoiceButtons(true);
-            resultMessageElement.textContent = 'Choice submitted! Waiting for opponent...';
+
+            // Display status message: "You selected Rock • Waiting for opponent..."
+            const choiceName = userChoice.charAt(0).toUpperCase() + userChoice.slice(1);
+            resultMessageElement.textContent = `You selected ${choiceName} • Waiting for opponent...`;
+
+            // Emit playerChoice to server with roomCode, matchId, uid, choice
+            socket.emit('playerChoice', {
+                roomCode: currentRoomCode || currentMatchId,
+                matchId: currentMatchId || currentRoomCode,
+                uid: uid,
+                choice: userChoice
+            });
+
+            // Also sync choice to RTDB for redundancy
+            if (currentMatchId) {
+                const isPlayerA = checkIsPlayerA();
+                const choicePath = isPlayerA ? `matches/${currentMatchId}/playerA/choice` : `matches/${currentMatchId}/playerB/choice`;
+                console.log(`📤 Writing RTDB choice: ${userChoice} to ${choicePath} (isPlayerA: ${isPlayerA})`);
+                rtdbSet(rtdbRef(rtdb, choicePath), userChoice).catch(() => {});
+            }
         } else {
             // Single Player match choice
             playRoundSinglePlayer(userChoice, button);
@@ -1472,25 +1619,7 @@ if (closeCreateRoomBtn) {
     });
 }
 
-if (confirmCreateRoomBtn) {
-    confirmCreateRoomBtn.addEventListener('click', () => {
-        const mode = createModeSelect.value;
-        const username = (userProfileData && userProfileData.username) ? userProfileData.username : (currentUser ? currentUser.email.split('@')[0] : 'Player 1');
-        const uid = currentUser ? currentUser.uid : socket.id;
-
-        // Get selected bet amount from bet chips
-        const activeBetChip = document.querySelector('#create-bet-chips .bet-chip.active');
-        const selectedBet = activeBetChip ? parseInt(activeBetChip.getAttribute('data-bet')) || 0 : 0;
-
-        socket.emit('createRoom', {
-            gameMode: mode,
-            uid: uid,
-            username: username,
-            avatar: '🥷',
-            betAmount: selectedBet
-        });
-    });
-}
+// Note: confirmCreateRoomBtn event handler is bound atomically in Step 8 with bet locking support
 
 if (btnOpenJoinRoom) {
     btnOpenJoinRoom.addEventListener('click', () => {
@@ -1521,13 +1650,41 @@ confirmJoinRoomBtn.addEventListener('click', () => {
 });
 
 // Waiting Room Controls
-playerReadyBtn.addEventListener('click', () => {
-    if (currentRoomCode) {
-        socket.emit('playerReady', { roomCode: currentRoomCode });
+playerReadyBtn.addEventListener('click', async () => {
+    playerReadyBtn.disabled = true;
+    try {
+        if (currentMatchId && currentRoomData) {
+            const isPlayerA = checkIsPlayerA();
+
+            if (isPlayerA) {
+                const p1 = currentRoomData.playerA || (currentRoomData.players ? currentRoomData.players[0] : null);
+                const newReady = !(p1 && p1.ready);
+                await rtdbSet(rtdbRef(rtdb, `matches/${currentMatchId}/playerA/ready`), newReady).catch(() => {});
+            } else {
+                const p2 = currentRoomData.playerB || (currentRoomData.players ? currentRoomData.players[1] : null);
+                const newReady = !(p2 && p2.ready);
+                await rtdbSet(rtdbRef(rtdb, `matches/${currentMatchId}/playerB/ready`), newReady).catch(() => {});
+            }
+        }
+        if (currentRoomCode) {
+            socket.emit('playerReady', { roomCode: currentRoomCode });
+        }
+    } catch (e) {
+        console.error('Error toggling ready state:', e);
+    } finally {
+        setTimeout(() => { playerReadyBtn.disabled = false; }, 300);
     }
 });
 
 leaveRoomBtn.addEventListener('click', () => {
+    if (currentMatchId) {
+        if (rtdbMatchUnsub) {
+            rtdbMatchUnsub();
+            rtdbMatchUnsub = null;
+        }
+        rtdbSet(rtdbRef(rtdb, `matches/${currentMatchId}/status`), 'cancelled').catch(() => {});
+        currentMatchId = null;
+    }
     if (currentRoomCode) {
         socket.emit('leaveRoom', { roomCode: currentRoomCode });
         currentRoomCode = null;
@@ -2579,8 +2736,8 @@ function refreshBetChipUI() {
     const activeChip = document.querySelector('#create-bet-chips .bet-chip.active');
     if (activeChip && warningText) {
         const selectedBet = parseInt(activeChip.getAttribute('data-bet')) || 0;
-        if (selectedBet > availableBalance) {
-            const deficit = selectedBet - availableBalance;
+        if (selectedBet > currentBalance) {
+            const deficit = selectedBet - currentBalance;
             warningText.textContent = `❌ Insufficient Coins. You need ${deficit} more coins.`;
             warningText.classList.remove('hidden');
             // Switch back to "No Bet"
@@ -2673,6 +2830,55 @@ async function lockUserBet(betAmount) {
 }
 
 /**
+ * Locks bet amount for specified user UID in Firestore atomically.
+ */
+async function lockUserBetForUid(targetUid, betAmount) {
+    if (!targetUid || betAmount <= 0) return false;
+
+    try {
+        const userDocRef = doc(db, 'users', targetUid);
+
+        const result = await runTransaction(db, async (transaction) => {
+            const userSnap = await transaction.get(userDocRef);
+            if (!userSnap.exists()) throw new Error('User document not found');
+
+            const userData = userSnap.data();
+            const currentCoins = userData.coins || 0;
+            const lockedCoins = userData.lockedCoins || 0;
+            const availableBalance = currentCoins - lockedCoins;
+
+            if (availableBalance < betAmount) {
+                return { locked: false, reason: 'insufficient_balance' };
+            }
+
+            transaction.update(userDocRef, {
+                coins: currentCoins - betAmount,
+                lockedCoins: lockedCoins + betAmount
+            });
+
+            return { locked: true, newBalance: currentCoins - betAmount, newLocked: lockedCoins + betAmount };
+        });
+
+        if (result.locked) {
+            if (currentUser && targetUid === currentUser.uid) {
+                userProgression.coins = result.newBalance;
+                if (userProfileData) userProfileData.lockedCoins = result.newLocked;
+                renderProgressionUI();
+            }
+            await recordCoinTransaction(targetUid, 'BET_LOCK', -betAmount, result.newBalance, null);
+            console.log(`🔒 Bet locked for ${targetUid}: ${betAmount} coins (Available: ${result.newBalance})`);
+            return true;
+        } else {
+            console.warn(`❌ Cannot lock bet for ${targetUid}: insufficient balance`);
+            return false;
+        }
+    } catch (e) {
+        console.error(`Error locking bet for ${targetUid}:`, e);
+        return false;
+    }
+}
+
+/**
  * Refunds a locked bet (e.g., challenge declined or expired).
  */
 async function refundLockedBet(betAmount) {
@@ -2712,16 +2918,10 @@ async function refundLockedBet(betAmount) {
 }
 
 
-// ========================================================================
-// 8g. FRIEND CHALLENGE SOCKET EVENT HANDLERS
-// ========================================================================
+let rtdbIncomingChallengesUnsub = null;
 
-// Listen for incoming friend challenges
-socket.on('receiveFriendChallenge', ({ challengeData }) => {
+function showIncomingChallengeModal(challengeData) {
     if (!currentUser || !challengeData) return;
-    // Only show if this challenge is for us
-    if (challengeData.opponentId && challengeData.opponentId !== currentUser.uid) return;
-
     const overlay = document.getElementById('incoming-challenge-overlay');
     const challengerName = document.getElementById('incoming-challenger-name');
     const challengeMode = document.getElementById('incoming-challenge-mode');
@@ -2737,10 +2937,8 @@ socket.on('receiveFriendChallenge', ({ challengeData }) => {
     if (challengeBet) challengeBet.textContent = `🪙 ${challengeData.betAmount} Coins`;
     if (challengePot) challengePot.textContent = `🪙 ${challengeData.betAmount * 2} Coins`;
 
-    // Keep Accept button ALWAYS clickable
     if (acceptBtn) acceptBtn.disabled = false;
 
-    // Show initial coins warning info if current balance is less than bet stake
     const currentBalance = userProgression.coins || 0;
     if (currentBalance < challengeData.betAmount) {
         if (warningEl) {
@@ -2751,19 +2949,364 @@ socket.on('receiveFriendChallenge', ({ challengeData }) => {
         if (warningEl) warningEl.classList.add('hidden');
     }
 
-    // Store challenge data for accept/decline handlers
     overlay._pendingChallenge = challengeData;
     overlay.classList.remove('hidden');
+}
+
+function subscribeIncomingRtdbChallenges(uid) {
+    if (!uid) return;
+    if (rtdbIncomingChallengesUnsub) return;
+
+    const myChallengesRef = rtdbRef(rtdb, `challenges/${uid}`);
+    console.log(`📡 Subscribing to RTDB incoming challenges path: challenges/${uid}`);
+
+    rtdbIncomingChallengesUnsub = rtdbOnValue(myChallengesRef, (snapshot) => {
+        try {
+            if (!snapshot.exists()) return;
+            const challengesObj = snapshot.val();
+            const keys = Object.keys(challengesObj);
+            keys.sort((a, b) => (challengesObj[b]?.createdAt || 0) - (challengesObj[a]?.createdAt || 0));
+
+            for (const key of keys) {
+                const ch = challengesObj[key];
+                if (ch && ch.status === 'PENDING' && ch.opponentId === uid) {
+                    showIncomingChallengeModal(ch);
+                    break;
+                }
+            }
+        } catch (e) {
+            console.error('Error processing RTDB challenges snapshot:', e);
+        }
+    }, (err) => console.error('❌ RTDB challenges listener error:', err));
+}
+
+// Listen for incoming friend challenges
+socket.on('receiveFriendChallenge', ({ challengeData }) => {
+    showIncomingChallengeModal(challengeData);
 });
 
-// Listen for challenge declined
-socket.on('friendChallengeDeclined', async ({ challengeId }) => {
-    // Refund creator's locked bet
-    if (currentUser && currentRoomData && currentRoomData.betAmount > 0) {
-        await refundLockedBet(currentRoomData.betAmount);
-        alert(`Challenge declined. Your 🪙 ${currentRoomData.betAmount} coins were returned.`);
+let currentMatchId = null;
+let rtdbMatchUnsub = null;
+
+function subscribeRtdbMatchRoom(matchId) {
+    if (!matchId) return;
+    if (currentMatchId === matchId && rtdbMatchUnsub) return;
+
+    if (rtdbMatchUnsub) {
+        rtdbMatchUnsub();
+        rtdbMatchUnsub = null;
     }
-});
+
+    currentMatchId = matchId;
+    isMultiplayerMode = true;
+
+    // Join Socket.IO room as well so server registers both players
+    if (typeof socket !== 'undefined' && socket && socket.connected && currentUser) {
+        const myName = (userProfileData && userProfileData.username) ? userProfileData.username : currentUser.email.split('@')[0];
+        socket.emit('joinRoom', {
+            roomCode: matchId,
+            matchId: matchId,
+            uid: currentUser.uid,
+            username: myName,
+            avatar: '⚡'
+        });
+    }
+
+    const matchRef = rtdbRef(rtdb, `matches/${matchId}`);
+    console.log(`📡 Subscribing to RTDB match room: matches/${matchId}`);
+
+    rtdbMatchUnsub = rtdbOnValue(matchRef, (snapshot) => {
+        try {
+            if (!snapshot.exists()) return;
+            const room = snapshot.val();
+            currentRoomData = room;
+            currentRoomCode = room.roomCode || room.matchId || matchId;
+
+            if (roomCodeVal) roomCodeVal.textContent = currentRoomCode;
+            if (waitingModeBadge) waitingModeBadge.textContent = `MODE: ${room.format || room.gameMode || 'Best of 4'}`;
+
+            const p1 = room.playerA || (room.players ? room.players[0] : null);
+            const p2 = room.playerB || (room.players ? room.players[1] : null);
+
+            if (p1) {
+                if (p1Name) p1Name.textContent = p1.name || p1.username || 'Host Player';
+                if (p1Avatar) p1Avatar.textContent = p1.avatar || '🥷';
+                if (p1Status) {
+                    p1Status.textContent = p1.ready ? 'Ready!' : 'Not Ready';
+                    p1Status.classList.toggle('ready', !!p1.ready);
+                }
+            }
+
+            if (p2) {
+                if (p2Name) p2Name.textContent = p2.name || p2.username || 'Player 2';
+                if (p2Avatar) p2Avatar.textContent = p2.avatar || '⚡';
+                if (p2Status) {
+                    p2Status.textContent = p2.ready ? 'Ready!' : 'Not Ready';
+                    p2Status.classList.toggle('ready', !!p2.ready);
+                }
+            }
+
+            // Check if BOTH players are ready
+            if (p1 && p2 && p1.ready === true && p2.ready === true) {
+                if (room.status === 'waiting') {
+                    if (currentUser && p1.uid === currentUser.uid) {
+                        rtdbSet(rtdbRef(rtdb, `matches/${matchId}/status`), 'starting').catch(() => {});
+                    }
+                } else if (room.status === 'starting' || room.status === 'playing') {
+                    if (!gameContainer.classList.contains('hidden') && document.body.classList.contains('in-game')) {
+                        // Already in game arena
+                    } else {
+                        startMultiplayerGameArenaFromRtdb(room);
+                    }
+                }
+            } else if (room.status === 'waiting' || !room.status) {
+                if (waitingRoomOverlay) waitingRoomOverlay.classList.remove('hidden');
+                if (createRoomOverlay) createRoomOverlay.classList.add('hidden');
+                if (joinRoomOverlay) joinRoomOverlay.classList.add('hidden');
+                if (modeSelectionOverlay) modeSelectionOverlay.classList.add('hidden');
+            }
+
+            // Check if match is finished
+            if (room.status === 'finished') {
+                handleRtdbMatchFinished(matchId, room);
+                return;
+            }
+
+            // Check if BOTH player choices exist in RTDB (Redundant RTDB Round Settlement)
+            if (p1 && p2 && p1.choice && p2.choice && (room.status === 'playing' || room.status === 'starting')) {
+                handleRtdbBothChoicesRevealed(matchId, room, p1, p2);
+            } else if (p1 && p2 && !p1.choice && !p2.choice && (room.status === 'playing' || room.status === 'starting')) {
+                handleRtdbNewRoundReset(room);
+            }
+        } catch (e) {
+            console.error('Error processing RTDB match room update:', e);
+        }
+    }, (err) => console.error('❌ RTDB match room listener error:', err));
+}
+
+let lastProcessedRtdbRoundKey = null;
+let lastResetRoundNum = 0;
+let isMatchFinishedHandled = false;
+
+async function handleRtdbMatchFinished(matchId, room) {
+    if (isMatchFinishedHandled) return;
+    isMatchFinishedHandled = true;
+
+    console.log(`🏁 RTDB Match Finished: ${matchId}`);
+
+    const p1 = room.playerA || (room.players ? room.players[0] : null);
+    const p2 = room.playerB || (room.players ? room.players[1] : null);
+
+    const p1Score = (p1 ? p1.score : 0) || 0;
+    const p2Score = (p2 ? p2.score : 0) || 0;
+
+    const isHost = checkIsPlayerA();
+    const myScore = isHost ? p1Score : p2Score;
+    const oppScore = isHost ? p2Score : p1Score;
+
+    let matchWinner = null;
+    let matchLoser = null;
+    let isTie = p1Score === p2Score;
+
+    if (p1Score > p2Score) {
+        matchWinner = p1;
+        matchLoser = p2;
+    } else if (p2Score > p1Score) {
+        matchWinner = p2;
+        matchLoser = p1;
+    }
+
+    const winnerUid = matchWinner ? matchWinner.uid : null;
+    const loserUid = matchLoser ? matchLoser.uid : null;
+    const betAmount = room.bet || room.betAmount || 0;
+
+    // Settle bet atomically in Firestore if there is a stake
+    if (betAmount > 0) {
+        await settleMultiplayerBetMatch(matchId, winnerUid, loserUid, betAmount, isTie);
+    }
+
+    let outcomeTag = 'DRAW';
+    const matchResultTitle = document.getElementById('match-result-title');
+    const matchTrophy = document.getElementById('match-trophy');
+    const matchScoreSummary = document.getElementById('match-score-summary');
+    const matchCoinsRewardEl = document.getElementById('match-coins-reward');
+
+    const iWon = matchWinner && currentUser && matchWinner.uid === currentUser.uid;
+
+    if (isTie) {
+        if (matchTrophy) matchTrophy.textContent = '🤝';
+        if (matchResultTitle) matchResultTitle.textContent = '🤝 Draw!';
+        outcomeTag = 'DRAW';
+    } else if (iWon) {
+        if (matchTrophy) matchTrophy.textContent = '🏆';
+        if (matchResultTitle) matchResultTitle.textContent = '🏆 You Won Match!';
+        outcomeTag = 'WIN';
+    } else {
+        if (matchTrophy) matchTrophy.textContent = '💀';
+        if (matchResultTitle) matchResultTitle.textContent = '💀 You Lost Match!';
+        outcomeTag = 'LOSE';
+    }
+
+    if (matchScoreSummary) {
+        matchScoreSummary.textContent = `Final Score: ${myScore} - ${oppScore}`;
+    }
+
+    // Update coin reward breakdown display
+    if (betAmount > 0 && matchCoinsRewardEl) {
+        if (outcomeTag === 'WIN') {
+            userProgression.coins += (betAmount * 2);
+            matchCoinsRewardEl.innerHTML = `<br><strong>Stake:</strong> 🪙 ${betAmount}<br><strong>Pot Won:</strong> +🪙 ${betAmount * 2}<br><strong>New Balance:</strong> 🪙 ${userProgression.coins}`;
+        } else if (outcomeTag === 'LOSE') {
+            matchCoinsRewardEl.innerHTML = `<br><strong>Stake Lost:</strong> -🪙 ${betAmount}<br><strong>New Balance:</strong> 🪙 ${userProgression.coins}`;
+        } else {
+            userProgression.coins += betAmount;
+            matchCoinsRewardEl.innerHTML = `<br><strong>Stake Refunded:</strong> +🪙 ${betAmount}<br><strong>New Balance:</strong> 🪙 ${userProgression.coins}`;
+        }
+        renderProgressionUI();
+    }
+
+    // Hide game screen and show victory overlay
+    if (gameContainer) gameContainer.classList.add('hidden');
+    document.body.classList.remove('in-game');
+    if (matchEndOverlay) matchEndOverlay.classList.remove('hidden');
+
+    const betBanner = document.getElementById('bet-match-banner');
+    if (betBanner) betBanner.classList.add('hidden');
+}
+
+function handleRtdbNewRoundReset(room) {
+    const roundNum = room.currentRound || 1;
+    if (roundNum === lastResetRoundNum && choiceButtons[0] && !choiceButtons[0].disabled) return;
+    lastResetRoundNum = roundNum;
+
+    console.log(`🔄 Resetting UI for Round ${roundNum}`);
+
+    clearVisualEffects();
+    userMoveDisplay.textContent = '❓';
+    computerMoveDisplay.textContent = '❓';
+    resultMessageElement.textContent = 'Make your move!';
+    roundDisplayBadge.textContent = `ROUND ${roundNum}`;
+    toggleChoiceButtons(false);
+}
+
+function handleRtdbBothChoicesRevealed(matchId, room, p1, p2) {
+    const roundKey = `${matchId}_r${room.currentRound || 1}_${p1.choice}_${p2.choice}`;
+    if (lastProcessedRtdbRoundKey === roundKey) return;
+    lastProcessedRtdbRoundKey = roundKey;
+    lastResetRoundNum = 0;
+
+    console.log(`✨ RTDB both choices revealed in ${matchId}: P1 (${p1.name}): ${p1.choice} vs P2 (${p2.name}): ${p2.choice}`);
+
+    const outcome = calculateServerWinner(p1.choice, p2.choice);
+    let p1Score = p1.score || 0;
+    let p2Score = p2.score || 0;
+
+    if (outcome === 'p1') p1Score++;
+    if (outcome === 'p2') p2Score++;
+
+    const isHost = currentUser && p1.uid === currentUser.uid;
+    const myChoice = isHost ? p1.choice : p2.choice;
+    const oppChoice = isHost ? p2.choice : p1.choice;
+    const myScore = isHost ? p1Score : p2Score;
+    const oppScore = isHost ? p2Score : p1Score;
+
+    toggleChoiceButtons(true);
+    animateMoveReveal(userMoveDisplay, moveEmojis[myChoice]);
+    animateMoveReveal(computerMoveDisplay, moveEmojis[oppChoice]);
+
+    userScoreElement.textContent = myScore;
+    computerScoreElement.textContent = oppScore;
+
+    clearVisualEffects();
+    resultMessageElement.classList.add('result-shake');
+
+    let myOutcome = 'draw';
+    if (outcome === 'p1') myOutcome = isHost ? 'win' : 'lose';
+    if (outcome === 'p2') myOutcome = isHost ? 'lose' : 'win';
+
+    const winnerName = outcome === 'p1' ? p1.name : (outcome === 'p2' ? p2.name : 'Draw');
+
+    if (myOutcome === 'win') {
+        resultMessageElement.textContent = `🎉 You win Round ${room.currentRound || 1}!`;
+        resultMessageElement.classList.add('result-win');
+        userCard.classList.add('winner');
+        computerCard.classList.add('loser');
+    } else if (myOutcome === 'lose') {
+        resultMessageElement.textContent = `🏆 ${winnerName || 'Opponent'} wins Round ${room.currentRound || 1}!`;
+        resultMessageElement.classList.add('result-lose');
+        computerCard.classList.add('computer-winner');
+        userCard.classList.add('loser');
+    } else {
+        resultMessageElement.textContent = `🤝 Round ${room.currentRound || 1} Draw!`;
+        resultMessageElement.classList.add('result-draw');
+    }
+
+    if (isHost) {
+        setTimeout(() => {
+            const nextRound = (room.currentRound || 1) + 1;
+            const targetWins = room.targetWins || 4;
+            if (p1Score >= targetWins || p2Score >= targetWins) {
+                rtdbSet(rtdbRef(rtdb, `matches/${matchId}/status`), 'finished').catch(() => {});
+            } else {
+                rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerA/choice`), null).catch(() => {});
+                rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerB/choice`), null).catch(() => {});
+                rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerA/score`), p1Score).catch(() => {});
+                rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerB/score`), p2Score).catch(() => {});
+                rtdbSet(rtdbRef(rtdb, `matches/${matchId}/currentRound`), nextRound).catch(() => {});
+            }
+        }, 2500);
+    }
+}
+
+function startMultiplayerGameArenaFromRtdb(room) {
+    if (waitingRoomOverlay) waitingRoomOverlay.classList.add('hidden');
+
+    const p1 = room.playerA || (room.players ? room.players[0] : null);
+    const p2 = room.playerB || (room.players ? room.players[1] : null);
+
+    const isPlayerA = currentUser && p1 && p1.uid === currentUser.uid;
+    const me = isPlayerA ? p1 : p2;
+    const opponent = isPlayerA ? p2 : p1;
+
+    const myName = me ? (me.name || me.username) : ((userProfileData && userProfileData.username) ? userProfileData.username : (currentUser ? currentUser.email.split('@')[0] : 'Player 1'));
+    const oppName = opponent ? (opponent.name || opponent.username) : 'Player 2';
+
+    userCardLabel.textContent = myName;
+    computerCardLabel.textContent = oppName;
+    userScoreLabel.textContent = `${myName}:`;
+    computerScoreLabel.textContent = `${oppName}:`;
+    arenaSubtitle.textContent = `Real-Time Match: ${myName} VS ${oppName}`;
+
+    const betBanner = document.getElementById('bet-match-banner');
+    const potAmount = room.pot || (room.bet ? room.bet * 2 : 0);
+    if (potAmount > 0 && betBanner) {
+        const betTotalPot = document.getElementById('bet-total-pot');
+        if (betTotalPot) betTotalPot.textContent = `🪙 ${potAmount}`;
+        betBanner.classList.remove('hidden');
+    } else if (betBanner) {
+        betBanner.classList.add('hidden');
+    }
+
+    if (openStatsArenaBtn) openStatsArenaBtn.classList.add('hidden');
+    if (openHistoryArenaBtn) openHistoryArenaBtn.classList.add('hidden');
+    if (inGameMenuBtn) inGameMenuBtn.classList.add('hidden');
+
+    modeDisplayBadge.textContent = `MODE: ${room.format || room.gameMode || 'Best of 4'}`;
+    roundDisplayBadge.textContent = `ROUND ${room.currentRound || 1}`;
+
+    userScoreElement.textContent = '0';
+    computerScoreElement.textContent = '0';
+    userMoveDisplay.textContent = '❓';
+    computerMoveDisplay.textContent = '❓';
+
+    clearVisualEffects();
+    toggleChoiceButtons(false);
+    gameContainer.classList.remove('hidden');
+    document.body.classList.add('in-game');
+
+    resultMessageElement.textContent = 'Make your move!';
+    animateResultText('FIGHT!', 'fight-pulse');
+}
 
 
 // ========================================================================
@@ -2781,108 +3324,167 @@ if (acceptChallengeBtn) {
         const challengeData = incomingChallengeOverlay._pendingChallenge;
         const warningEl = document.getElementById('incoming-challenge-warning');
 
-        // Disable button during execution to prevent duplicate clicks
         acceptChallengeBtn.disabled = true;
+        const origHtml = acceptChallengeBtn.innerHTML;
+        acceptChallengeBtn.innerHTML = '⏳ Accepting...';
 
         try {
-            // 1. Fetch FRESH Firebase coin balance for current user
+            // 0. Prevent duplicate acceptance
+            if (challengeData.status === 'ACCEPTED') {
+                alert('Challenge already accepted.');
+                acceptChallengeBtn.disabled = false;
+                acceptChallengeBtn.innerHTML = origHtml;
+                return;
+            }
+
+            // 1. Fetch FRESH balance for receiver B
             const receiverDocRef = doc(db, 'users', currentUser.uid);
             const receiverSnap = await getDoc(receiverDocRef);
             
             if (!receiverSnap.exists()) {
                 if (warningEl) {
-                    warningEl.innerHTML = `❌ User document not found in Firebase.`;
+                    warningEl.innerHTML = `❌ User profile not found.`;
                     warningEl.classList.remove('hidden');
                 }
                 acceptChallengeBtn.disabled = false;
+                acceptChallengeBtn.innerHTML = origHtml;
                 return;
             }
 
             const receiverData = receiverSnap.data();
             const receiverCoins = receiverData.coins || 0;
+            const betAmount = challengeData.betAmount || 0;
 
-            // Validate receiver's current balance
-            if (receiverCoins < challengeData.betAmount) {
+            if (receiverCoins < betAmount) {
                 if (warningEl) {
-                    warningEl.innerHTML = `❌ Not enough coins to play this game.<br>Required: ${challengeData.betAmount} coins<br>Your balance: ${receiverCoins} coins`;
+                    warningEl.innerHTML = `❌ Not enough coins to play this game.<br>Required: ${betAmount} coins<br>Your balance: ${receiverCoins} coins`;
                     warningEl.classList.remove('hidden');
                 }
+                alert('Not enough coins to play');
                 acceptChallengeBtn.disabled = false;
+                acceptChallengeBtn.innerHTML = origHtml;
                 return;
             }
 
-            // 2. Fetch FRESH Firebase coin balance for challenger if creatorId exists
+            // 2. Fetch FRESH balance for challenger A
             if (challengeData.creatorId) {
                 const creatorDocRef = doc(db, 'users', challengeData.creatorId);
                 const creatorSnap = await getDoc(creatorDocRef);
-
                 if (creatorSnap.exists()) {
                     const creatorData = creatorSnap.data();
                     const creatorCoins = creatorData.coins || 0;
-
-                    if (creatorCoins < challengeData.betAmount) {
-                        if (warningEl) {
-                            warningEl.innerHTML = `❌ Challenger no longer has enough coins to play this game.`;
-                            warningEl.classList.remove('hidden');
-                        }
+                    if (creatorCoins < betAmount) {
+                        alert('Challenger no longer has enough coins to play.');
                         acceptChallengeBtn.disabled = false;
+                        acceptChallengeBtn.innerHTML = origHtml;
                         return;
                     }
                 }
             }
 
-            // 3. Lock receiver's bet atomically in Firebase
-            const locked = await lockUserBet(challengeData.betAmount);
-            if (!locked) {
-                if (warningEl) {
-                    warningEl.innerHTML = `❌ Failed to lock bet. Insufficient balance.`;
-                    warningEl.classList.remove('hidden');
+            // 3. ATOMICALLY DEDUCT / LOCK BET FROM BOTH PLAYERS UPON ACCEPTANCE
+            if (betAmount > 0) {
+                const lockedA = await lockUserBetForUid(challengeData.creatorId, betAmount);
+                const lockedB = await lockUserBet(betAmount);
+                if (!lockedA || !lockedB) {
+                    alert('Not enough coins to play');
+                    acceptChallengeBtn.disabled = false;
+                    acceptChallengeBtn.innerHTML = origHtml;
+                    return;
                 }
-                acceptChallengeBtn.disabled = false;
-                return;
             }
 
-            // 4. Hide challenge overlay and join match room
+            // 4. CREATE MATCH ROOM IN FIREBASE RTDB
+            const matchId = `match_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+            const roomCode = matchId.substring(6, 12).toUpperCase();
+            const myName = (userProfileData && userProfileData.username) ? userProfileData.username : currentUser.email.split('@')[0];
+
+            const matchPayload = {
+                matchId: matchId,
+                roomCode: roomCode,
+                status: 'waiting',
+                format: challengeData.gameMode || 'Best of 4',
+                targetWins: parseInt((challengeData.gameMode || 'Best of 4').replace('Best of ', '')) || 4,
+                bet: betAmount,
+                pot: betAmount * 2,
+                playerA: {
+                    uid: challengeData.creatorId,
+                    name: challengeData.creatorName || 'Player 1',
+                    avatar: '🥷',
+                    ready: false,
+                    score: 0,
+                    choice: null
+                },
+                playerB: {
+                    uid: currentUser.uid,
+                    name: myName,
+                    avatar: '⚡',
+                    ready: false,
+                    score: 0,
+                    choice: null
+                },
+                currentRound: 1,
+                createdAt: rtdbServerTimestamp()
+            };
+
+            await rtdbSet(rtdbRef(rtdb, `matches/${matchId}`), matchPayload);
+
+            // 5. ATOMICALLY UPDATE RTDB CHALLENGE STATUS TO ACCEPTED WITH MATCH ID
+            const acceptedChallengePayload = {
+                ...challengeData,
+                status: 'ACCEPTED',
+                matchId: matchId,
+                roomCode: roomCode,
+                acceptedAt: rtdbServerTimestamp()
+            };
+
+            if (challengeData.opponentId && challengeData.challengeId) {
+                await rtdbSet(rtdbRef(rtdb, `challenges/${challengeData.opponentId}/${challengeData.challengeId}`), acceptedChallengePayload).catch(() => {});
+            }
+            if (challengeData.creatorId && challengeData.challengeId) {
+                await rtdbSet(rtdbRef(rtdb, `challenges/${challengeData.creatorId}/${challengeData.challengeId}`), acceptedChallengePayload).catch(() => {});
+            }
+
             incomingChallengeOverlay.classList.add('hidden');
-
-            if (challengeData.roomCode) {
-                const username = (userProfileData && userProfileData.username) ? userProfileData.username : currentUser.email.split('@')[0];
-                const uid = currentUser.uid;
-
-                socket.emit('joinRoom', {
-                    roomCode: challengeData.roomCode,
-                    uid: uid,
-                    username: username,
-                    avatar: '⚡'
-                });
-            }
-
             incomingChallengeOverlay._pendingChallenge = null;
+
+            // 6. IMMEDIATELY SUBSCRIBE PLAYER B TO MATCH ROOM & NAVIGATE TO WAITING ROOM
+            subscribeRtdbMatchRoom(matchId);
+
         } catch (err) {
             console.error('Error accepting challenge:', err);
-            if (warningEl) {
-                warningEl.innerHTML = `❌ Error accepting challenge. Please try again.`;
-                warningEl.classList.remove('hidden');
-            }
+            alert('Failed to accept challenge.');
         } finally {
             acceptChallengeBtn.disabled = false;
+            acceptChallengeBtn.innerHTML = origHtml;
         }
     });
 }
 
 if (declineChallengeBtn) {
-    declineChallengeBtn.addEventListener('click', () => {
+    declineChallengeBtn.addEventListener('click', async () => {
         if (!incomingChallengeOverlay || !incomingChallengeOverlay._pendingChallenge) return;
 
         const challengeData = incomingChallengeOverlay._pendingChallenge;
+        declineChallengeBtn.disabled = true;
 
-        socket.emit('declineFriendChallenge', {
-            challengeId: challengeData.challengeId || null,
-            creatorSocketId: challengeData.creatorSocketId || null
-        });
+        try {
+            if (challengeData.opponentId && challengeData.challengeId) {
+                await rtdbSet(rtdbRef(rtdb, `challenges/${challengeData.opponentId}/${challengeData.challengeId}/status`), 'DECLINED').catch(() => {});
+            }
 
-        incomingChallengeOverlay.classList.add('hidden');
-        incomingChallengeOverlay._pendingChallenge = null;
+            socket.emit('declineFriendChallenge', {
+                challengeId: challengeData.challengeId || null,
+                creatorSocketId: challengeData.creatorSocketId || null
+            });
+
+            incomingChallengeOverlay.classList.add('hidden');
+            incomingChallengeOverlay._pendingChallenge = null;
+        } catch (e) {
+            console.error('Error declining challenge:', e);
+        } finally {
+            declineChallengeBtn.disabled = false;
+        }
     });
 }
 
@@ -2906,19 +3508,7 @@ if (origConfirmCreateRoomBtn) {
         const activeBetChip = document.querySelector('#create-bet-chips .bet-chip.active');
         const selectedBet = activeBetChip ? parseInt(activeBetChip.getAttribute('data-bet')) || 0 : 0;
 
-        // If bet > 0, lock coins first
-        if (selectedBet > 0 && currentUser) {
-            const locked = await lockUserBet(selectedBet);
-            if (!locked) {
-                const warningText = document.getElementById('create-bet-warning');
-                if (warningText) {
-                    warningText.textContent = '❌ Insufficient Coins. Cannot create bet match.';
-                    warningText.classList.remove('hidden');
-                }
-                return;
-            }
-        }
-
+        // Room creation does NOT deduct coins (coins only locked when match accepted/started)
         socket.emit('createRoom', {
             gameMode: mode,
             uid: uid,
@@ -2969,31 +3559,6 @@ function startChallengeExpirationTimer(betAmount, timeoutMs = 300000) {
 }
 
 
-// ========================================================================
-// 8k. PLAYER DISCONNECT DURING BET MATCH - REFUND HANDLER
-// ========================================================================
-
-// Update the existing playerDisconnected handler to also handle bet refunds
-socket.on('playerDisconnected', async (data) => {
-    const room = data.room;
-    const betAmount = (currentRoomData && currentRoomData.betAmount) || 0;
-
-    // If this was a bet match and the match wasn't finished, refund the bet
-    if (betAmount > 0 && currentUser && currentRoomData && currentRoomData.status !== 'finished') {
-        try {
-            await refundLockedBet(betAmount);
-            console.log(`🔓 Bet refunded due to opponent disconnect: +${betAmount} coins`);
-        } catch (e) {
-            console.error('Error refunding bet on disconnect:', e);
-        }
-    }
-
-    // Hide bet banner
-    const betBanner = document.getElementById('bet-match-banner');
-    if (betBanner) betBanner.classList.add('hidden');
-});
-
-
 console.log('🪙 Virtual Coin & Betting Challenge System initialized!');
 
 
@@ -3003,18 +3568,14 @@ console.log('🪙 Virtual Coin & Betting Challenge System initialized!');
  * --------------------------------------------------------------------------
  */
 
-let onlineUserUidsSet = new Set();
-let socketOnlineUidsSet = new Set();
-let rtdbOnlineUidsSet = new Set();
-
-let allRegisteredUsersList = [];
-let userFriendshipsList = [];
-let selectedChallengeTargetFriend = null;
-
+let rebuildOnlineDebounceTimer = null;
 function rebuildCombinedOnlineSet() {
     onlineUserUidsSet = new Set([...socketOnlineUidsSet, ...rtdbOnlineUidsSet]);
-    renderFriendsTab();
-    renderAllPlayersTab();
+    if (rebuildOnlineDebounceTimer) clearTimeout(rebuildOnlineDebounceTimer);
+    rebuildOnlineDebounceTimer = setTimeout(() => {
+        renderFriendsTab();
+        renderAllPlayersTab();
+    }, 50);
 }
 
 // Socket Presence Listeners
@@ -3125,52 +3686,53 @@ function subscribeGlobalRtdbPresence() {
         console.log('📡 Subscribing to RTDB global presence path: /users');
 
         rtdbUsersListenerUnsub = rtdbOnValue(usersRef, (snapshot) => {
-            const newSet = new Set();
-            if (snapshot.exists()) {
-                const users = snapshot.val();
-                Object.keys(users).forEach(uid => {
-                    const u = users[uid];
-                    if (u) {
-                        const hasConns = u.connections && Object.keys(u.connections).length > 0;
-                        if (u.online === true || hasConns) {
-                            newSet.add(uid);
+            try {
+                const newSet = new Set();
+                if (snapshot.exists()) {
+                    const users = snapshot.val();
+                    Object.keys(users).forEach(uid => {
+                        const u = users[uid];
+                        if (u) {
+                            const hasConns = u.connections && Object.keys(u.connections).length > 0;
+                            if (u.online === true || hasConns) {
+                                newSet.add(uid);
+                            }
                         }
-                    }
-                });
+                    });
+                }
+                rtdbOnlineUidsSet = newSet;
+                rebuildCombinedOnlineSet();
+            } catch (e) {
+                console.error('Error processing RTDB /users presence update:', e);
             }
-            rtdbOnlineUidsSet = newSet;
-            rebuildCombinedOnlineSet();
         }, (err) => console.error('❌ RTDB presence listener error on /users:', err));
     }
 
     if (!rtdbStatusListenerUnsub) {
         const statusRef = rtdbRef(rtdb, 'status');
         rtdbStatusListenerUnsub = rtdbOnValue(statusRef, (snapshot) => {
-            if (snapshot.exists()) {
-                const statuses = snapshot.val();
-                Object.keys(statuses).forEach(uid => {
-                    const st = statuses[uid];
-                    if (st) {
-                        const hasConns = st.connections && Object.keys(st.connections).length > 0;
-                        if (st.state === 'online' || hasConns) {
-                            rtdbOnlineUidsSet.add(uid);
+            try {
+                if (snapshot.exists()) {
+                    const statuses = snapshot.val();
+                    Object.keys(statuses).forEach(uid => {
+                        const st = statuses[uid];
+                        if (st) {
+                            const hasConns = st.connections && Object.keys(st.connections).length > 0;
+                            if (st.state === 'online' || hasConns) {
+                                rtdbOnlineUidsSet.add(uid);
+                            }
                         }
-                    }
-                });
-                rebuildCombinedOnlineSet();
+                    });
+                    rebuildCombinedOnlineSet();
+                }
+            } catch (e) {
+                console.error('Error processing RTDB /status presence update:', e);
             }
         }, (err) => console.error('❌ RTDB presence listener error on /status:', err));
     }
 }
 
-// Presence Register on Socket Connect / Reconnect
-socket.on('connect', () => {
-    if (currentUser) {
-        registerCurrentPresence();
-        initRtdbPresence(currentUser.uid);
-        subscribeGlobalRtdbPresence();
-    }
-});
+// Presence listeners managed in Step 4 connect handler
 
 function registerCurrentPresence() {
     if (currentUser) {
@@ -3214,13 +3776,6 @@ window.addEventListener('beforeunload', () => {
 // 9a. FIRESTORE FRIEND DATA REALTIME LISTENERS
 // --------------------------------------------------------------------------
 
-let allUsersUnsubscribe = null;
-let friendships1Unsubscribe = null;
-let friendships2Unsubscribe = null;
-
-let q1FriendshipsMap = new Map();
-let q2FriendshipsMap = new Map();
-
 function setupSocialRealtimeListeners() {
     if (!currentUser) return;
 
@@ -3228,34 +3783,53 @@ function setupSocialRealtimeListeners() {
     if (allUsersUnsubscribe) allUsersUnsubscribe();
     const usersQ = query(collection(db, 'users'), limit(500));
     allUsersUnsubscribe = onSnapshot(usersQ, (snap) => {
-        allRegisteredUsersList = [];
-        snap.forEach(docSnap => {
-            const data = docSnap.data();
-            allRegisteredUsersList.push({
-                uid: docSnap.id || data.uid,
-                ...data
+        try {
+            lastLoadUsersError = null;
+            allRegisteredUsersList = [];
+            snap.forEach(docSnap => {
+                const data = docSnap.data();
+                allRegisteredUsersList.push({
+                    uid: docSnap.id || data.uid,
+                    ...data
+                });
             });
-        });
+            renderAllPlayersTab();
+            renderFriendsTab();
+        } catch (e) {
+            console.error('Error processing users snapshot:', e);
+            lastLoadUsersError = e;
+            renderAllPlayersTab();
+        }
+    }, (err) => {
+        console.warn('Error in allUsers realtime listener:', err);
+        lastLoadUsersError = err;
         renderAllPlayersTab();
-        renderFriendsTab();
-    }, (err) => console.warn('Error in allUsers realtime listener:', err));
+    });
 
     // 2. Realtime listener for friendships (as user1)
     if (friendships1Unsubscribe) friendships1Unsubscribe();
     const q1 = query(collection(db, 'friends'), where('user1Id', '==', currentUser.uid));
     friendships1Unsubscribe = onSnapshot(q1, (snap1) => {
-        q1FriendshipsMap.clear();
-        snap1.forEach(d => q1FriendshipsMap.set(d.id, { id: d.id, ...d.data() }));
-        updateMergedFriendshipsUI();
+        try {
+            q1FriendshipsMap.clear();
+            snap1.forEach(d => q1FriendshipsMap.set(d.id, { id: d.id, ...d.data() }));
+            updateMergedFriendshipsUI();
+        } catch (e) {
+            console.error('Error processing friendships1 snapshot:', e);
+        }
     }, (err) => console.warn('Error in friendships1 listener:', err));
 
     // 3. Realtime listener for friendships (as user2)
     if (friendships2Unsubscribe) friendships2Unsubscribe();
     const q2 = query(collection(db, 'friends'), where('user2Id', '==', currentUser.uid));
     friendships2Unsubscribe = onSnapshot(q2, (snap2) => {
-        q2FriendshipsMap.clear();
-        snap2.forEach(d => q2FriendshipsMap.set(d.id, { id: d.id, ...d.data() }));
-        updateMergedFriendshipsUI();
+        try {
+            q2FriendshipsMap.clear();
+            snap2.forEach(d => q2FriendshipsMap.set(d.id, { id: d.id, ...d.data() }));
+            updateMergedFriendshipsUI();
+        } catch (e) {
+            console.error('Error processing friendships2 snapshot:', e);
+        }
     }, (err) => console.warn('Error in friendships2 listener:', err));
 }
 
@@ -3265,7 +3839,7 @@ function updateMergedFriendshipsUI() {
 
     // Update Pending Requests Badge Count in UI
     const pendingIncoming = userFriendshipsList.filter(f => f.status === 'PENDING' && f.receiverId === (currentUser ? currentUser.uid : null));
-    const reqBadgeEl = document.getElementById('requests-tab-badge');
+    const reqBadgeEl = document.getElementById('requests-badge-count');
     if (reqBadgeEl) {
         if (pendingIncoming.length > 0) {
             reqBadgeEl.textContent = pendingIncoming.length;
@@ -3560,7 +4134,7 @@ async function sendFriendRequest(targetUid, targetName) {
 
         socket.emit('sendFriendRequestNotif', { receiverUid: targetUid, senderName: myName });
 
-        await loadUserFriendships();
+        updateMergedFriendshipsUI();
         renderAllPlayersTab();
         renderRequestsTab();
 
@@ -3589,7 +4163,7 @@ async function acceptFriendRequest(docId, requesterUid) {
             socket.emit('friendRequestResponseNotif', { targetUid: requesterUid, responderName: myName, accepted: true });
         }
 
-        await loadUserFriendships();
+        updateMergedFriendshipsUI();
         renderFriendsTab();
         renderAllPlayersTab();
         renderRequestsTab();
@@ -3620,7 +4194,7 @@ async function rejectFriendRequest(docId) {
             updatedAt: serverTimestamp()
         });
 
-        await loadUserFriendships();
+        updateMergedFriendshipsUI();
         renderFriendsTab();
         renderAllPlayersTab();
         renderRequestsTab();
@@ -3711,13 +4285,16 @@ if (closeChallengeConfigBtn) {
 const sendDirectChallengeBtn = document.getElementById('send-direct-challenge-btn');
 if (sendDirectChallengeBtn) {
     sendDirectChallengeBtn.addEventListener('click', async () => {
-        if (!currentUser || !selectedChallengeTargetFriend) return;
+        if (!currentUser || !selectedChallengeTargetFriend) {
+            alert('Please select an online friend to challenge.');
+            return;
+        }
 
         const friendUid = selectedChallengeTargetFriend.uid;
         const friendName = selectedChallengeTargetFriend.name;
 
         if (!onlineUserUidsSet.has(friendUid)) {
-            alert(`⚫ ${friendName} went offline.`);
+            alert(`⚫ ${friendName} is currently offline.`);
             const modal = document.getElementById('friend-challenge-config-modal');
             if (modal) modal.classList.add('hidden');
             return;
@@ -3735,43 +4312,87 @@ if (sendDirectChallengeBtn) {
             return;
         }
 
-        const locked = await lockUserBet(betAmount);
-        if (!locked) {
-            alert('❌ Failed to lock bet. Insufficient balance.');
-            return;
-        }
+        sendDirectChallengeBtn.disabled = true;
+        const origText = sendDirectChallengeBtn.innerHTML;
+        sendDirectChallengeBtn.innerHTML = '⏳ Sending Challenge...';
 
-        const modal = document.getElementById('friend-challenge-config-modal');
-        if (modal) modal.classList.add('hidden');
+        try {
+            const myName = (userProfileData && userProfileData.username) ? userProfileData.username : currentUser.email.split('@')[0];
+            const challengeId = `ch_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+            const challengeRef = rtdbRef(rtdb, `challenges/${friendUid}/${challengeId}`);
+            
+            const challengeData = {
+                challengeId: challengeId,
+                creatorId: currentUser.uid,
+                creatorName: myName,
+                creatorSocketId: socket.id || null,
+                opponentId: friendUid,
+                opponentName: friendName,
+                betAmount: betAmount,
+                gameMode: gameMode,
+                status: 'PENDING',
+                createdAt: rtdbServerTimestamp()
+            };
 
-        const myName = (userProfileData && userProfileData.username) ? userProfileData.username : currentUser.email.split('@')[0];
+            // 1. CREATE CHALLENGE IN FIREBASE RTDB (DO NOT DEDUCT OR LOCK COINS AT SEND TIME!)
+            await rtdbSet(challengeRef, challengeData);
+            console.log('✅ Challenge written to Firebase RTDB! (Coins remain unchanged at 80/current balance)');
 
-        socket.emit('createRoom', {
-            gameMode: gameMode,
-            uid: currentUser.uid,
-            username: myName,
-            avatar: '🥷',
-            betAmount: betAmount
-        });
+            // 2. LISTEN FOR ACCEPTANCE / DECLINE ON THIS CHALLENGE
+            const sentChallengeRef = rtdbRef(rtdb, `challenges/${friendUid}/${challengeId}`);
+            let isAutoNavigated = false;
 
-        socket.once('roomCreated', ({ roomCode }) => {
-            socket.emit('sendFriendChallenge', {
-                challengeData: {
-                    challengeId: `ch_${Date.now()}`,
-                    creatorId: currentUser.uid,
-                    creatorName: myName,
-                    creatorSocketId: socket.id,
-                    opponentId: friendUid,
-                    opponentName: friendName,
-                    betAmount: betAmount,
-                    gameMode: gameMode,
-                    roomCode: roomCode,
-                    status: 'PENDING',
-                    createdAt: Date.now()
+            const sentUnsub = rtdbOnValue(sentChallengeRef, async (snap) => {
+                if (!snap.exists()) return;
+                const val = snap.val();
+                const status = val?.status;
+                
+                if (status === 'DECLINED') {
+                    if (sentUnsub) sentUnsub();
+                    alert(`⚔️ ${friendName} declined your challenge. No coins were lost.`);
+                } else if (status === 'ACCEPTED') {
+                    const matchId = val.matchId || val.roomCode;
+                    if (matchId && !isAutoNavigated) {
+                        isAutoNavigated = true;
+                        if (sentUnsub) sentUnsub();
+                        console.log('🚀 Challenger auto-navigating to match room:', matchId);
+                        subscribeRtdbMatchRoom(matchId);
+                    }
                 }
             });
+
+            // 4. EMIT SOCKET NOTIFICATION & EXPIRATION TIMER
+            socket.emit('sendFriendChallenge', { challengeData });
             startChallengeExpirationTimer(betAmount, 300000);
-        });
+
+            // 5. SHOW SUCCESS FEEDBACK & CLOSE MODAL
+            showRewardToast(0, 0);
+            if (rewardToast) rewardToast.textContent = `⚔️ Challenge sent to ${friendName}!`;
+
+            const modal = document.getElementById('friend-challenge-config-modal');
+            if (modal) modal.classList.add('hidden');
+
+            // 6. CREATE MULTIPLAYER ROOM FOR HOST
+            socket.emit('createRoom', {
+                gameMode: gameMode,
+                uid: currentUser.uid,
+                username: myName,
+                avatar: '🥷',
+                betAmount: betAmount,
+                challengeId: challengeId
+            });
+
+            socket.once('roomCreated', ({ roomCode }) => {
+                rtdbSet(rtdbRef(rtdb, `challenges/${friendUid}/${challengeId}/roomCode`), roomCode).catch(() => {});
+            });
+
+        } catch (err) {
+            console.error('❌ Challenge send error:', err);
+            alert(`Failed to send challenge: ${err.message || 'Firebase write failed'}`);
+        } finally {
+            sendDirectChallengeBtn.disabled = false;
+            sendDirectChallengeBtn.innerHTML = origText;
+        }
     });
 }
 
@@ -3809,7 +4430,11 @@ if (tabFriendsBtn && tabAllPlayersBtn && tabRequestsBtn) {
         if (socialFriendsPanel) socialFriendsPanel.classList.add('hidden');
         if (socialRequestsPanel) socialRequestsPanel.classList.add('hidden');
 
-        loadSocialData();
+        if (!allUsersUnsubscribe && currentUser) {
+            loadSocialData();
+        } else {
+            renderAllPlayersTab();
+        }
     });
 
     tabRequestsBtn.addEventListener('click', () => {

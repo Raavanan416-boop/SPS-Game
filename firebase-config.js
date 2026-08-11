@@ -52,15 +52,15 @@ let firebaseConfig = {
 
 // Fetch environment config dynamically from Express server if available
 try {
-    const res = await fetch('/api/config');
-    if (res.ok) {
+    const res = await fetch('/api/config').catch(() => null);
+    if (res && res.ok) {
         const envConfig = await res.json();
         if (envConfig.apiKey) {
             firebaseConfig = { ...firebaseConfig, ...envConfig };
         }
     }
 } catch (e) {
-    console.warn('Using local fallback Firebase config:', e);
+    // Silent fallback to default client config when running on static hosts
 }
 
 // Initialize Firebase App

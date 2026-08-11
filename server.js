@@ -146,37 +146,75 @@ io.on('connection', (socket) => {
         socket.emit('roomCreated', { roomCode, room: newRoom });
     });
 
-    // 2. JOIN ROOM
-    socket.on('joinRoom', ({ roomCode, uid, username, avatar }) => {
-        const cleanCode = (roomCode || '').trim().toUpperCase();
-        const room = rooms.get(cleanCode);
+    // 2. JOIN ROOM (SUPPORT DYNAMIC ROOM CREATION & RECONNECTS)
+    socket.on('joinRoom', ({ roomCode, matchId, uid, username, avatar, gameMode, betAmount }) => {
+        const cleanCode = (roomCode || matchId || '').trim().toUpperCase();
+        if (!cleanCode) return;
 
+        let room = rooms.get(cleanCode);
+
+        // Search rooms by matchId or challengeId if not found by exact cleanCode key
         if (!room) {
-            return socket.emit('errorMsg', 'Room not found! Please check the code.');
+            for (const r of rooms.values()) {
+                if (r.code === cleanCode || r.challengeId === cleanCode || (r.matchId && r.matchId === cleanCode)) {
+                    room = r;
+                    break;
+                }
+            }
         }
 
-        if (room.players.length >= 2) {
-            return socket.emit('errorMsg', 'Room is full (Maximum 2 players)!');
+        // Auto-initialize room on server if created via RTDB
+        if (!room) {
+            const targetWins = parseInt((gameMode || 'Best of 4').replace('Best of ', '')) || 4;
+            const validatedBet = parseInt(betAmount) || 0;
+
+            room = {
+                code: cleanCode,
+                matchId: cleanCode,
+                gameMode: `Best of ${targetWins}`,
+                targetWins: targetWins,
+                betAmount: validatedBet,
+                pot: validatedBet * 2,
+                currentRound: 1,
+                players: [],
+                status: 'waiting'
+            };
+            rooms.set(cleanCode, room);
+            console.log(`🏠 Server auto-initialized room for: ${cleanCode}`);
         }
 
-        const player2 = {
-            socketId: socket.id,
-            uid: uid || socket.id,
-            username: username || 'Player 2',
-            avatar: avatar || '⚡',
-            ready: false,
-            score: 0,
-            choice: null,
-            isHost: false
-        };
-
-        room.players.push(player2);
         socket.join(cleanCode);
         socket.roomCode = cleanCode;
 
-        console.log(`🎮 Player 2 (${player2.username}) joined Room: ${cleanCode}`);
+        // Check if player with this UID already exists in room (e.g., reconnect/sync)
+        let existingPlayer = room.players.find(p => (uid && p.uid === uid) || p.socketId === socket.id);
+        if (existingPlayer) {
+            existingPlayer.socketId = socket.id;
+            if (username) existingPlayer.username = username;
+            console.log(`🔄 Player ${existingPlayer.username} (${uid}) updated socketId in room: ${cleanCode}`);
+        } else {
+            if (room.players.length >= 2) {
+                console.warn(`⚠️ Room ${cleanCode} is full (2 players already exist).`);
+                return socket.emit('errorMsg', 'Room is full (Maximum 2 players)!');
+            }
+
+            const isHost = room.players.length === 0;
+            const newPlayer = {
+                socketId: socket.id,
+                uid: uid || socket.id,
+                username: username || (isHost ? 'Player 1' : 'Player 2'),
+                avatar: avatar || (isHost ? '🥷' : '⚡'),
+                ready: false,
+                score: 0,
+                choice: null,
+                isHost: isHost
+            };
+            room.players.push(newPlayer);
+            console.log(`🎮 Player (${newPlayer.username}) joined room: ${cleanCode} (Total Players: ${room.players.length})`);
+        }
 
         io.to(cleanCode).emit('playerJoined', { room });
+        io.to(cleanCode).emit('roomUpdated', { room });
     });
 
     // 3. TOGGLE PLAYER READY
@@ -210,26 +248,76 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 4. PLAYER CHOICE SELECTION (SERVER-SIDE VALIDATION)
-    socket.on('playerChoice', ({ roomCode, choice }) => {
-        const room = rooms.get(roomCode);
-        if (!room || room.status !== 'playing') return;
+    // 4. PLAYER CHOICE SELECTION (SERVER-SIDE VALIDATION & ROUND SYNCHRONIZATION)
+    socket.on('playerChoice', ({ roomCode, matchId, uid, choice }) => {
+        let room = null;
+        if (roomCode) room = rooms.get((roomCode || '').trim().toUpperCase());
+        if (!room && matchId) {
+            for (const r of rooms.values()) {
+                if (r.code === matchId || r.challengeId === matchId || (r.matchId && r.matchId === matchId)) {
+                    room = r;
+                    break;
+                }
+            }
+        }
+        if (!room) {
+            for (const r of rooms.values()) {
+                if (r.players.some(p => p.socketId === socket.id || (uid && p.uid === uid))) {
+                    room = r;
+                    break;
+                }
+            }
+        }
+
+        if (!room) {
+            console.warn(`❌ playerChoice: Room not found for code '${roomCode}' / matchId '${matchId}' / uid '${uid}'`);
+            return;
+        }
+
+        if (room.status === 'starting' || room.status === 'counting' || room.status === 'waiting') {
+            room.status = 'playing';
+        }
 
         const validChoices = ['stone', 'paper', 'scissors'];
         if (!validChoices.includes(choice)) return;
 
-        const player = room.players.find(p => p.socketId === socket.id);
-        if (player) {
-            player.choice = choice;
-            console.log(`✊ Choice submitted in ${roomCode} by ${player.username}: ${choice}`);
+        const player = room.players.find(p => p.socketId === socket.id || (uid && p.uid === uid));
+        if (!player) {
+            console.warn(`❌ playerChoice: Player not found in room '${room.code}' for socket '${socket.id}' / uid '${uid}'`);
+            return;
         }
 
+        player.socketId = socket.id;
+
+        if (player.choice !== null) {
+            console.log(`⚠️ Player ${player.username} already submitted choice in ${room.code}`);
+            return;
+        }
+
+        player.choice = choice;
+        player.submitted = true;
+        console.log(`✊ CHOICE SUBMITTED in room ${room.code} by ${player.username} (${player.uid}): ${choice}`);
+
+        // Acknowledge submission to the submitting player
+        socket.emit('choiceSubmitted', { choice: choice, currentRound: room.currentRound });
+
+        // Notify opponent that the other player has submitted choice (without revealing choice)
+        socket.to(room.code).emit('opponentChoiceSubmitted', {
+            username: player.username,
+            currentRound: room.currentRound
+        });
+
+        console.log(`🔍 CHECK BOTH PLAYERS in ${room.code}:`);
+        room.players.forEach((p, idx) => {
+            console.log(`   Player ${idx + 1} (${p.username}): choice = ${p.choice}`);
+        });
+
         // Check if BOTH players have submitted their choices
-        if (room.players.every(p => p.choice !== null)) {
+        if (room.players.length === 2 && room.players.every(p => p.choice !== null)) {
+            console.log(`✨ BOTH CHOICES RECEIVED in ${room.code}! Calculating round result...`);
             const p1 = room.players[0];
             const p2 = room.players[1];
 
-            // Calculate winner securely on server
             const outcome = calculateServerWinner(p1.choice, p2.choice);
 
             if (outcome === 'p1') {
@@ -238,18 +326,27 @@ io.on('connection', (socket) => {
                 p2.score++;
             }
 
-            // Emit round result to both clients
-            io.to(roomCode).emit('roundResult', {
-                roomCode: roomCode,
+            const resultPayload = {
+                roomCode: room.code,
+                matchId: room.code,
+                currentRound: room.currentRound,
+                p1Uid: p1.uid,
+                p1Name: p1.username,
                 p1Choice: p1.choice,
+                p2Uid: p2.uid,
+                p2Name: p2.username,
                 p2Choice: p2.choice,
                 p1Score: p1.score,
                 p2Score: p2.score,
-                outcome: outcome, // 'p1', 'p2', or 'draw'
-                currentRound: room.currentRound
-            });
+                outcome: outcome,
+                winnerName: outcome === 'p1' ? p1.username : (outcome === 'p2' ? p2.username : 'Draw')
+            };
 
-            // Check if match is finished (sole condition: playerScore >= targetWins)
+            console.log(`🏆 ROUND RESULT for ${room.code}: ${p1.username} (${p1.choice}) VS ${p2.username} (${p2.choice}) -> Outcome: ${outcome} (Score: ${p1.score}-${p2.score})`);
+
+            // Broadcast round result to BOTH players in the room
+            io.to(room.code).emit('roundResult', resultPayload);
+
             const isTargetReached = p1.score >= room.targetWins || p2.score >= room.targetWins;
 
             if (isTargetReached) {
@@ -267,8 +364,8 @@ io.on('connection', (socket) => {
                 }
 
                 setTimeout(() => {
-                    io.to(roomCode).emit('matchFinished', {
-                        roomCode: roomCode,
+                    io.to(room.code).emit('matchFinished', {
+                        roomCode: room.code,
                         p1Score: p1.score,
                         p2Score: p2.score,
                         winner: matchWinner,
@@ -280,17 +377,23 @@ io.on('connection', (socket) => {
                         pot: room.pot || 0,
                         challengeId: room.challengeId || null
                     });
-                }, 600);
+                }, 800);
 
             } else {
-                // Next round reset after showing results for 2.5 seconds
                 room.currentRound++;
                 p1.choice = null;
+                p1.submitted = false;
                 p2.choice = null;
+                p2.submitted = false;
 
                 setTimeout(() => {
-                    if (rooms.has(roomCode) && room.status === 'playing') {
-                        io.to(roomCode).emit('startRoundChoices', { room });
+                    if (rooms.has(room.code) && room.status === 'playing') {
+                        console.log(`🔄 Emitting nextRound for ${room.code} (Round ${room.currentRound})`);
+                        io.to(room.code).emit('nextRound', {
+                            currentRound: room.currentRound,
+                            room: room
+                        });
+                        io.to(room.code).emit('startRoundChoices', { room: room });
                     }
                 }, 2500);
             }
