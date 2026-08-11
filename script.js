@@ -3086,19 +3086,20 @@ function subscribeRtdbMatchRoom(matchId) {
 
 let lastProcessedRtdbRoundKey = null;
 let lastResetRoundNum = 0;
-let isMatchFinishedHandled = false;
+let finishedMatchIds = new Set();
 
 async function handleRtdbMatchFinished(matchId, room) {
-    if (isMatchFinishedHandled) return;
-    isMatchFinishedHandled = true;
+    if (!matchId) return;
+    if (finishedMatchIds.has(matchId)) return;
+    finishedMatchIds.add(matchId);
 
     console.log(`🏁 RTDB Match Finished: ${matchId}`);
 
     const p1 = room.playerA || (room.players ? room.players[0] : null);
     const p2 = room.playerB || (room.players ? room.players[1] : null);
 
-    const p1Score = (p1 ? p1.score : 0) || 0;
-    const p2Score = (p2 ? p2.score : 0) || 0;
+    const p1Score = (p1 ? (typeof p1.score === 'number' ? p1.score : 0) : 0);
+    const p2Score = (p2 ? (typeof p2.score === 'number' ? p2.score : 0) : 0);
 
     const isHost = checkIsPlayerA();
     const myScore = isHost ? p1Score : p2Score;
@@ -3119,6 +3120,8 @@ async function handleRtdbMatchFinished(matchId, room) {
     const winnerUid = matchWinner ? matchWinner.uid : null;
     const loserUid = matchLoser ? matchLoser.uid : null;
     const betAmount = room.bet || room.betAmount || 0;
+
+    console.log(`🏆 MATCH FINISH SCORES: P1 (${p1 ? p1.name : 'P1'}): ${p1Score} vs P2 (${p2 ? p2.name : 'P2'}): ${p2Score} | Winner: ${matchWinner ? matchWinner.name : 'Tie'}`);
 
     // Settle bet atomically in Firestore if there is a stake
     if (betAmount > 0) {
@@ -3175,6 +3178,11 @@ async function handleRtdbMatchFinished(matchId, room) {
 }
 
 function handleRtdbNewRoundReset(room) {
+    if (!room) return;
+    if (room.status === 'finished' || (currentMatchId && finishedMatchIds.has(currentMatchId))) {
+        return;
+    }
+
     const roundNum = room.currentRound || 1;
     if (roundNum === lastResetRoundNum && choiceButtons[0] && !choiceButtons[0].disabled) return;
     lastResetRoundNum = roundNum;
@@ -3242,11 +3250,17 @@ function handleRtdbBothChoicesRevealed(matchId, room, p1, p2) {
     }
 
     if (isHost) {
-        setTimeout(() => {
+        setTimeout(async () => {
             const nextRound = (room.currentRound || 1) + 1;
             const targetWins = room.targetWins || 4;
             if (p1Score >= targetWins || p2Score >= targetWins) {
-                rtdbSet(rtdbRef(rtdb, `matches/${matchId}/status`), 'finished').catch(() => {});
+                // Update final scores FIRST in RTDB so both clients see final score before status becomes finished
+                await rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerA/score`), p1Score).catch(() => {});
+                await rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerB/score`), p2Score).catch(() => {});
+                await rtdbSet(rtdbRef(rtdb, `matches/${matchId}/status`), 'finished').catch(() => {});
+
+                // Ensure local host also triggers finish overlay
+                handleRtdbMatchFinished(matchId, room);
             } else {
                 rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerA/choice`), null).catch(() => {});
                 rtdbSet(rtdbRef(rtdb, `matches/${matchId}/playerB/choice`), null).catch(() => {});
@@ -3259,6 +3273,10 @@ function handleRtdbBothChoicesRevealed(matchId, room, p1, p2) {
 }
 
 function startMultiplayerGameArenaFromRtdb(room) {
+    if (!room) return;
+    if (room.status === 'finished' || (currentMatchId && finishedMatchIds.has(currentMatchId))) {
+        return;
+    }
     if (waitingRoomOverlay) waitingRoomOverlay.classList.add('hidden');
 
     const p1 = room.playerA || (room.players ? room.players[0] : null);
