@@ -129,10 +129,8 @@ const matchTrophy = document.getElementById('match-trophy');
 const matchXpReward = document.getElementById('match-xp-reward');
 const matchCoinsReward = document.getElementById('match-coins-reward');
 
-const playAgainBtn = document.getElementById('play-again-btn');
 const backToMenuBtn = document.getElementById('back-to-menu-btn');
 const inGameMenuBtn = document.getElementById('in-game-menu-btn');
-const resetButton = document.getElementById('reset-btn');
 
 // Profile Buttons & Content
 const openProfileBtn = document.getElementById('open-profile-btn');
@@ -1802,21 +1800,7 @@ lbTabs.forEach(tab => {
     });
 });
 
-resetButton.addEventListener('click', () => {
-    if (isMultiplayerMode) {
-        if (currentRoomCode) socket.emit('rematch', { roomCode: currentRoomCode });
-    } else {
-        startNewSinglePlayerMatch(selectedModeRounds);
-    }
-});
 
-playAgainBtn.addEventListener('click', () => {
-    if (isMultiplayerMode) {
-        if (currentRoomCode) socket.emit('rematch', { roomCode: currentRoomCode });
-    } else {
-        startNewSinglePlayerMatch(selectedModeRounds);
-    }
-});
 
 if (backToMenuBtn) backToMenuBtn.addEventListener('click', showModeMenu);
 if (inGameMenuBtn) inGameMenuBtn.addEventListener('click', showModeMenu);
